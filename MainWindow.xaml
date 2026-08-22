@@ -1,0 +1,523 @@
+<Window x:Class="copperInspection.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:copperInspection"
+        Title="Copper Defect Detection — Background Subtraction &amp; Color Analysis"
+        Height="900" Width="1400"
+        MinHeight="720" MinWidth="1100"
+        Background="#000000">
+
+    <Window.Resources>
+        <!-- Primary button -->
+        <Style x:Key="PrimaryBtn" TargetType="Button">
+            <Setter Property="Background" Value="#38BDF8"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Padding" Value="12,6"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="5" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#4752C4"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Background" Value="#33335A"/>
+                                <Setter Property="Foreground" Value="#555577"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="RunBtn" TargetType="Button" BasedOn="{StaticResource PrimaryBtn}">
+            <Setter Property="Background" Value="#22C55E"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#16A34A"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#163A1E"/>
+                    <Setter Property="Foreground" Value="#2E6040"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="FieldLbl" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#9090B8"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Margin" Value="0,0,0,3"/>
+        </Style>
+
+        <Style x:Key="SectionHdr" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#D8D8F0"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Margin" Value="0,0,0,8"/>
+        </Style>
+
+        <!-- Dropdown item (the rows inside the open list) -->
+        <Style x:Key="DarkComboItem" TargetType="ComboBoxItem">
+            <Setter Property="Background" Value="#111827"/>
+            <Setter Property="Foreground" Value="#F9FAFB"/>
+            <Setter Property="Padding" Value="7,5"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter TextElement.Foreground="{TemplateBinding Foreground}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#1F2937"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="DarkCombo" TargetType="ComboBox">
+            <Setter Property="Background" Value="#111827"/>
+            <Setter Property="Foreground" Value="#F9FAFB"/>
+            <Setter Property="BorderBrush" Value="#383860"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="7,4"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Height" Value="28"/>
+            <Setter Property="ItemContainerStyle" Value="{StaticResource DarkComboItem}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="22"/>
+                            </Grid.ColumnDefinitions>
+
+                            <!-- Box surface -->
+                            <Border x:Name="MainBorder" Grid.ColumnSpan="2"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="3"/>
+
+                            <!-- Selected value -->
+                            <ContentPresenter Grid.Column="0" Margin="7,0,0,0"
+                                              VerticalAlignment="Center" HorizontalAlignment="Left"
+                                              Content="{TemplateBinding SelectionBoxItem}"
+                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                              IsHitTestVisible="False"
+                                              TextElement.Foreground="{TemplateBinding Foreground}"/>
+
+                            <!-- Drop arrow -->
+                            <Path Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                  Data="M0,0 L8,0 L4,5 Z" Fill="{TemplateBinding Foreground}"/>
+
+                            <!-- Transparent toggle opens the dropdown -->
+                            <ToggleButton Grid.ColumnSpan="2" Focusable="False" ClickMode="Press"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay,
+                                                      RelativeSource={RelativeSource TemplatedParent}}">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border Background="Transparent"/>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                            </ToggleButton>
+
+                            <!-- Dropdown list -->
+                            <Popup x:Name="PART_Popup" Placement="Bottom" Focusable="False"
+                                   AllowsTransparency="True" PopupAnimation="Slide"
+                                   IsOpen="{TemplateBinding IsDropDownOpen}">
+                                <Border Background="#111827" BorderBrush="#383860" BorderThickness="1"
+                                        CornerRadius="3" MaxHeight="{TemplateBinding MaxDropDownHeight}"
+                                        MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}">
+                                    <ScrollViewer>
+                                        <ItemsPresenter/>
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="MainBorder" Property="BorderBrush" Value="#4B5BD4"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="NumBox" TargetType="TextBox">
+            <Setter Property="Background" Value="#252540"/>
+            <Setter Property="Foreground" Value="#E0E0F0"/>
+            <Setter Property="BorderBrush" Value="#383860"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="7,4"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Height" Value="28"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+
+        <Style x:Key="ImgCard" TargetType="Border">
+            <Setter Property="Background" Value="#000000"/>
+            <Setter Property="BorderBrush" Value="#CBD5E1"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="6"/>
+            <Setter Property="Padding" Value="6"/>
+        </Style>
+
+        <Style x:Key="RadioBtn" TargetType="RadioButton">
+            <Setter Property="Foreground" Value="#9090B8"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Margin" Value="0,0,0,5"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <!-- title -->
+            <RowDefinition Height="*"/>
+            <!-- body -->
+            <RowDefinition Height="Auto"/>
+            <!-- status -->
+        </Grid.RowDefinitions>
+
+        <!-- ══ TITLE BAR ══ -->
+        <Border Grid.Row="0" Background="#0000" Padding="18,10">
+            <Grid>
+                <!-- Options menu, pinned top-left -->
+                <Menu HorizontalAlignment="Left" VerticalAlignment="Center"
+                      Background="Transparent" Foreground="#E8E8F8">
+                    <MenuItem Header="☰  Options" FontSize="14" FontWeight="SemiBold"
+                              Foreground="#E8E8F8" Background="Transparent">
+                        <MenuItem Header="📊  Reports" Foreground="#111827"
+                                  Click="ReportsMenuItem_Click"/>
+                    </MenuItem>
+                </Menu>
+
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Center">
+                    <TextBlock Text="Copper Defect Detector" FontSize="32" FontWeight="Bold" Foreground="#E8E8F8" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- ══ BODY ══ -->
+        <Grid Grid.Row="1" Margin="14,12,14,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="270"/>
+                <ColumnDefinition Width="178*"/>
+                <ColumnDefinition Width="373*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- ─── LEFT PANEL ─── -->
+            <Border Grid.Column="0" Background="#222222" CornerRadius="10"
+                    Margin="0,0,0,0" Padding="14,14,14,14">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel>
+
+                        <!-- Folder -->
+                        <TextBlock Text="📁  Image Folder" Style="{StaticResource SectionHdr}"/>
+                        <Button x:Name="BrowseFolderBtn" Content="Browse Folder…"
+                                Style="{StaticResource PrimaryBtn}"
+                                Click="BrowseFolderBtn_Click"
+                                HorizontalAlignment="Stretch" Margin="0,0,0,5"/>
+                        <TextBlock x:Name="FolderPathLabel" Text="No folder selected"
+                                   Foreground="#484870" FontSize="10"
+                                   TextWrapping="Wrap" Margin="0,0,0,14"/>
+
+                        <!-- Image selection -->
+                        <TextBlock Text="🖼  Image Selection" Style="{StaticResource SectionHdr}"/>
+                        <TextBlock Text="Image to Inspect" Style="{StaticResource FieldLbl}"/>
+                        <ComboBox x:Name="TargetCombo" Style="{StaticResource DarkCombo}" Margin="0,0,0,8"
+                                  SelectionChanged="TargetCombo_SelectionChanged"/>
+
+                        <StackPanel x:Name="BackgroundImagePanel" Visibility="Collapsed">
+                            <TextBlock Text="Background Image (Reference-Diff mode)" Style="{StaticResource FieldLbl}"/>
+                            <ComboBox x:Name="ReferenceCombo" Style="{StaticResource DarkCombo}" Margin="0,0,0,16"/>
+                        </StackPanel>
+
+                        <!-- ══ BACKGROUND SUBTRACTION ══ -->
+                        <TextBlock Text="🌓  Background Subtraction" Style="{StaticResource SectionHdr}"/>
+                        <RadioButton x:Name="RadioSilhouette"
+                                     Content="Silhouette (1 image)"
+                                     Style="{StaticResource RadioBtn}"
+                                     IsChecked="True"
+                                     GroupName="BgMethod"
+                                     Checked="BgMethod_Checked"/>
+                        <RadioButton x:Name="RadioReferenceDiff"
+                                     Content="Reference-Image Diff (2 images)"
+                                     Style="{StaticResource RadioBtn}"
+                                     GroupName="BgMethod"
+                                     Checked="BgMethod_Checked"
+                                     Margin="0,0,0,10"/>
+
+                        <!-- Silhouette params -->
+                        <StackPanel x:Name="SilhouettePanel">
+                            <CheckBox x:Name="AutoThresholdCheck" Content="Auto Threshold (Otsu)"
+                                      IsChecked="True" Foreground="#C0C0E0" FontSize="11"
+                                      Margin="0,0,0,8" Checked="AutoThresholdCheck_Changed"
+                                      Unchecked="AutoThresholdCheck_Changed"/>
+                            <Grid Margin="0,0,0,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Threshold (manual)" Style="{StaticResource FieldLbl}" Margin="0"/>
+                                <TextBlock Grid.Column="1" x:Name="SilhouetteThresholdLabel" Text="60"
+                                           Foreground="#5865F2" FontSize="11" FontWeight="SemiBold"/>
+                            </Grid>
+                            <Slider x:Name="SilhouetteThresholdSlider" Minimum="0" Maximum="255" Value="60"
+                                    IsEnabled="False" TickFrequency="5" IsSnapToTickEnabled="True"
+                                    Foreground="#5865F2" Margin="0,0,0,14"
+                                    ValueChanged="SilhouetteThresholdSlider_ValueChanged"/>
+                        </StackPanel>
+
+                        <!-- Reference-diff params -->
+                        <StackPanel x:Name="DiffPanel" Visibility="Collapsed">
+                            <Grid Margin="0,0,0,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Noise Reduction (Blur)" Style="{StaticResource FieldLbl}" Margin="0"/>
+                                <TextBlock Grid.Column="1" x:Name="DiffBlurLabel" Text="5"
+                                           Foreground="#5865F2" FontSize="11" FontWeight="SemiBold"/>
+                            </Grid>
+                            <Slider x:Name="DiffBlurSlider" Minimum="1" Maximum="21" Value="5"
+                                    TickFrequency="2" IsSnapToTickEnabled="True"
+                                    Foreground="#5865F2" Margin="0,0,0,10"
+                                    ValueChanged="DiffBlurSlider_ValueChanged"/>
+
+                            <Grid Margin="0,0,0,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Difference Threshold" Style="{StaticResource FieldLbl}" Margin="0"/>
+                                <TextBlock Grid.Column="1" x:Name="DiffThresholdLabel" Text="20"
+                                           Foreground="#5865F2" FontSize="11" FontWeight="SemiBold"/>
+                            </Grid>
+                            <Slider x:Name="DiffThresholdSlider" Minimum="0" Maximum="150" Value="20"
+                                    TickFrequency="5" IsSnapToTickEnabled="True"
+                                    Foreground="#5865F2" Margin="0,0,0,14"
+                                    ValueChanged="DiffThresholdSlider_ValueChanged"/>
+                        </StackPanel>
+
+                        <!-- ══ DETECTION METHOD ══ -->
+                        <TextBlock Text="🔬  Detection Method" Style="{StaticResource SectionHdr}"/>
+                        <RadioButton x:Name="RadioColorDiff"
+                                     Content="Color Difference"
+                                     Style="{StaticResource RadioBtn}"
+                                     IsChecked="True"
+                                     GroupName="DetMethod"
+                                     Checked="DetMethod_Checked"/>
+                        <RadioButton x:Name="RadioPatchCoreR50"
+                                     Content="PatchCore — ResNet50 (Phase 2)"
+                                     Style="{StaticResource RadioBtn}"
+                                     GroupName="DetMethod"
+                                     Checked="DetMethod_Checked"/>
+                        <RadioButton x:Name="RadioPatchCoreR18"
+                                     Content="PatchCore — ResNet18 (Phase 2)"
+                                     Style="{StaticResource RadioBtn}"
+                                     GroupName="DetMethod"
+                                     Checked="DetMethod_Checked"
+                                     Margin="0,0,0,10"/>
+
+                        <StackPanel x:Name="ColorDiffPanel">
+                            <Grid Margin="0,0,0,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Colour Distance Threshold" Style="{StaticResource FieldLbl}" Margin="0"/>
+                                <TextBlock Grid.Column="1" x:Name="ColorThresholdLabel" Text="80"
+                                           Foreground="#5865F2" FontSize="11" FontWeight="SemiBold"/>
+                            </Grid>
+                            <Slider x:Name="ColorThresholdSlider" Minimum="0" Maximum="300" Value="80"
+                                    TickFrequency="10" IsSnapToTickEnabled="True"
+                                    Foreground="#5865F2" Margin="0,0,0,10"
+                                    ValueChanged="ColorThresholdSlider_ValueChanged"/>
+
+                            <Grid Margin="0,0,0,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Min Defect Area (%)" Style="{StaticResource FieldLbl}" Margin="0"/>
+                                <TextBlock Grid.Column="1" x:Name="ColorMinAreaLabel" Text="0.5"
+                                           Foreground="#5865F2" FontSize="11" FontWeight="SemiBold"/>
+                            </Grid>
+                            <Slider x:Name="ColorMinAreaSlider" Minimum="0" Maximum="10" Value="0.5"
+                                    TickFrequency="0.5" IsSnapToTickEnabled="True"
+                                    Foreground="#5865F2" Margin="0,0,0,14"
+                                    ValueChanged="ColorMinAreaSlider_ValueChanged"/>
+                        </StackPanel>
+
+                        <!-- Reference colour swatch -->
+                        <TextBlock Text="🎨  Reference Color" Style="{StaticResource SectionHdr}"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,18">
+                            <Border x:Name="RefColorSwatch" Width="36" Height="36"
+                                    CornerRadius="6" Background="#888888"
+                                    BorderBrush="#444460" BorderThickness="1" Margin="0,0,8,0"/>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock x:Name="RefColorLabel" Text="R:— G:— B:—"
+                                           Foreground="#7070A0" FontSize="11"/>
+                                <TextBlock x:Name="RefHexLabel" Text="#——"
+                                           Foreground="#5865F2" FontSize="11" FontWeight="SemiBold"/>
+                            </StackPanel>
+                        </StackPanel>
+
+                        <!-- Run button -->
+                        <Button x:Name="RunBtn" Content="▶  Run Detection"
+                                Style="{StaticResource RunBtn}"
+                                Click="RunBtn_Click"
+                                HorizontalAlignment="Stretch"
+                                FontSize="13" Padding="12,9" Margin="0,0,0,10"/>
+
+                        <ProgressBar x:Name="ProgressBar" Height="4"
+                                     IsIndeterminate="False"
+                                     Background="#1E1E38" Foreground="#5865F2"
+                                     Visibility="Collapsed" Margin="0,0,0,10"/>
+
+                        <!-- Verdict badges -->
+                        <Border x:Name="DefectBadge" Background="#1A0A0A"
+                                BorderBrush="#EF4444" BorderThickness="1" CornerRadius="7"
+                                Padding="10,8" Visibility="Collapsed">
+                            <TextBlock x:Name="DefectCountLabel" Text="BAD"
+                                       Foreground="#EF4444" FontSize="13" FontWeight="Bold"
+                                       HorizontalAlignment="Center"/>
+                        </Border>
+                        <Border x:Name="OkBadge" Background="#0A1A0A"
+                                BorderBrush="#22C55E" BorderThickness="1" CornerRadius="7"
+                                Padding="10,8" Visibility="Collapsed">
+                            <TextBlock x:Name="OkBadgeLabel" Text="✓  GOOD" Foreground="#22C55E"
+                                       FontSize="13" FontWeight="Bold"
+                                       HorizontalAlignment="Center"/>
+                        </Border>
+
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+
+            <!-- ─── RIGHT IMAGE GRID  (Original/BG-subtracted, Heatmap/Defect mask) ─── -->
+            <Grid Grid.Column="1" Grid.ColumnSpan="2">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="8"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="8"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Row 1 · Col 1 : Original image -->
+                <Border Grid.Row="0" Grid.Column="0" Style="{StaticResource ImgCard}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,5">
+                            <Border Background="#252548" CornerRadius="4" Padding="5,2" Margin="0,0,5,0">
+                                <TextBlock Text="1" Foreground="#7878FF" FontSize="10" FontWeight="Bold"/>
+                            </Border>
+                            <TextBlock Text="Original Image" Foreground="#C0C0E0" FontSize="11" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <Border Grid.Row="1" Background="#333333" CornerRadius="4" MinHeight="140">
+                            <Image x:Name="Cam1TargetImage" Stretch="Uniform"
+                                   RenderOptions.BitmapScalingMode="HighQuality"/>
+                        </Border>
+                    </Grid>
+                </Border>
+
+                <!-- Row 1 · Col 2 : Background-subtracted result -->
+                <Border Grid.Row="0" Grid.Column="2" Style="{StaticResource ImgCard}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,5">
+                            <Border Background="#142A1E" CornerRadius="4" Padding="5,2" Margin="0,0,5,0">
+                                <TextBlock Text="2" Foreground="#66FF99" FontSize="10" FontWeight="Bold"/>
+                            </Border>
+                            <TextBlock Text="Background Subtracted" Foreground="#C0C0E0" FontSize="11" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <Border Grid.Row="1" Background="#333333" CornerRadius="4" MinHeight="140">
+                            <Image x:Name="Cam1ResultImage" Stretch="Uniform"
+                                   RenderOptions.BitmapScalingMode="HighQuality"/>
+                        </Border>
+                    </Grid>
+                </Border>
+
+                <!-- separator -->
+                <Border Grid.Row="1" Grid.ColumnSpan="3" Background="#2A2A44" Height="1" VerticalAlignment="Center" Margin="4,0"/>
+
+                <!-- Row 2 · Col 1 : Distance heatmap -->
+                <Border Grid.Row="2" Grid.Column="0" Style="{StaticResource ImgCard}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,5">
+                            <Border Background="#2A1E14" CornerRadius="4" Padding="5,2" Margin="0,0,5,0">
+                                <TextBlock Text="3" Foreground="#FFAA66" FontSize="10" FontWeight="Bold"/>
+                            </Border>
+                            <TextBlock Text="Distance from Reference" Foreground="#C0C0E0" FontSize="11" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <Border Grid.Row="1" Background="#333333" CornerRadius="4" MinHeight="140">
+                            <Image x:Name="Cam2TargetImage" Stretch="Uniform"
+                                   RenderOptions.BitmapScalingMode="HighQuality"/>
+                        </Border>
+                    </Grid>
+                </Border>
+
+                <!-- Row 2 · Col 2 : Defect mask overlay -->
+                <Border Grid.Row="2" Grid.Column="2" Style="{StaticResource ImgCard}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,5">
+                            <Border Background="#2A1414" CornerRadius="4" Padding="5,2" Margin="0,0,5,0">
+                                <TextBlock Text="4" Foreground="#FF6666" FontSize="10" FontWeight="Bold"/>
+                            </Border>
+                            <TextBlock Text="Defect Mask" Foreground="#C0C0E0" FontSize="11" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <Border Grid.Row="1" Background="#333333" CornerRadius="4" MinHeight="140">
+                            <Image x:Name="Cam2ResultImage" Stretch="Uniform"
+                                   RenderOptions.BitmapScalingMode="HighQuality"/>
+                        </Border>
+                    </Grid>
+                </Border>
+
+            </Grid>
+        </Grid>
+
+        <!-- ══ STATUS BAR ══ -->
+        <Border Grid.Row="2" Background="#0E0E1C" Padding="18,6">
+            <Grid>
+                <TextBlock x:Name="StatusLabel" Text="Ready — select a folder and run detection."
+                           Foreground="#505078" FontSize="11"
+                           HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                <TextBlock Text="OpenCvSharp4  ·  .NET 8  ·  WPF"
+                           Foreground="#323250" FontSize="10"
+                           HorizontalAlignment="Right" VerticalAlignment="Center"/>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

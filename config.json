@@ -1,0 +1,22 @@
+{
+  "BackgroundMethod": "Silhouette",
+  "FlattenLighting": true,
+  "AutoThreshold": true,
+  "SilhouetteThreshold": 60,
+  "RegionsToKeep": 1,
+  "MirrorOnLeft": true,
+  "SilhouetteMorphKernel": 5,
+  "FillHoles": true,
+
+  "DiffBlur": 5,
+  "DiffThreshold": 20,
+  "DiffMorphKernel": 5,
+  "MatchExposure": true,
+  "AllowResize": false,
+
+  "DetectionMethod": "ColorDiff",
+  "ColorDiffThreshold": 80.0,
+  "ColorDiffMinAreaPct": 0.5,
+  "ColorDiffMorphKernel": 5,
+  "ReferenceColorPath": "Assets/reference_color.json"
+}
