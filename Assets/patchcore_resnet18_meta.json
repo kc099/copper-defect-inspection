@@ -1,0 +1,6 @@
+{
+  "backbone": "resnet18",
+  "feature_dim": 384,
+  "num_patches": 102400,
+  "threshold": 0.004296875
+}

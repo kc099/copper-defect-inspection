@@ -18,5 +18,5 @@
   "ColorDiffThreshold": 80.0,
   "ColorDiffMinAreaPct": 0.5,
   "ColorDiffMorphKernel": 5,
-  "ReferenceColorPath": "Assets/reference_color.json"
+  "ReferenceColorPath": "Assets/reference_color1.json"
 }

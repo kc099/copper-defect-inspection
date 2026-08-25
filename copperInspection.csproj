@@ -10,16 +10,37 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <None Remove="Assets\patchcore_resnet18.onnx" />
+    <None Remove="Assets\patchcore_resnet18.onnx.data" />
+    <None Remove="Assets\patchcore_resnet18_bank.bin" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.29.0" />
     <PackageReference Include="MongoDB.Driver" Version="3.9.0" />
-    <PackageReference Include="neoAPI" Version="1.6.0" />
     <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260602" />
     <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260602" />
     <PackageReference Include="OpenCvSharp4.WpfExtensions" Version="4.13.0.20260602" />
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="Assets\patchcore_resnet18.onnx">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Assets\patchcore_resnet18.onnx.data">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Assets\patchcore_resnet18_bank.bin">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Hand-editable pipeline config - lives next to the .exe, not %AppData%,
          and PreserveNewest so an operator's edits survive a rebuild. -->
+    <None Update="Assets\reference_color1.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Update="config.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

@@ -9,6 +9,8 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using copperInspection.Detection;
+using System.Numerics.Tensors;
 
 namespace copperInspection
 {
@@ -22,6 +24,9 @@ namespace copperInspection
 
         private PipelineConfig _config = new();
         private ReferenceColor? _referenceColor;
+        private PatchCoreDetector _detector;
+        private string? _loadedBackbone = null;
+
 
         public MainWindow()
         {
@@ -54,6 +59,7 @@ namespace copperInspection
             if (c.BackgroundMethod == "ReferenceDiff") RadioReferenceDiff.IsChecked = true;
             else RadioSilhouette.IsChecked = true;
 
+            FlattenLightingCheck.IsChecked = c.FlattenLighting;
             AutoThresholdCheck.IsChecked = c.AutoThreshold;
             SilhouetteThresholdSlider.Value = c.SilhouetteThreshold;
             SilhouetteThresholdSlider.IsEnabled = !c.AutoThreshold;
@@ -98,7 +104,7 @@ namespace copperInspection
         private PipelineConfig CollectConfig() => new()
         {
             BackgroundMethod = RadioReferenceDiff.IsChecked == true ? "ReferenceDiff" : "Silhouette",
-            FlattenLighting = _config.FlattenLighting,
+            FlattenLighting = FlattenLightingCheck.IsChecked == true,
             AutoThreshold = AutoThresholdCheck.IsChecked == true,
             SilhouetteThreshold = (int)SilhouetteThresholdSlider.Value,
             RegionsToKeep = _config.RegionsToKeep,
@@ -208,6 +214,61 @@ namespace copperInspection
             if (SilhouetteThresholdSlider != null)
                 SilhouetteThresholdSlider.IsEnabled = AutoThresholdCheck.IsChecked != true;
         }
+        // ══════════════════════════════════════════════════════
+        //  Patchcore loading class
+        // ══════════════════════════════════════════════════════
+
+        
+
+        private PatchCoreDetector GetOrLoadDetector(string backboneName)
+        {
+            // If the detector is already initialized for this backbone, reuse it
+            if (_detector != null && _loadedBackbone == backboneName)
+            {
+                return _detector;
+            }
+
+            // Dispose existing session before loading new model
+            _detector?.Dispose();
+
+            string onnxFile = backboneName == "PatchCore-R18"
+                ? "patchcore_resnet18.onnx"
+                : "patchcore_resnet50.onnx";
+
+            string binFile = backboneName == "PatchCore-R18"
+                ? "patchcore_resnet18_bank.bin"
+                : "patchcore_resnet50_bank.bin";
+
+            string metaFile = backboneName == "PatchCore-R18"
+                ? "patchcore_resnet18_meta.json"
+                : "patchcore_resnet50_meta.json";
+
+            string onnxPath = Path.Combine(AppContext.BaseDirectory, "Assets", onnxFile);
+            string binPath = Path.Combine(AppContext.BaseDirectory, "Assets", binFile);
+            string metaPath = Path.Combine(AppContext.BaseDirectory, "Assets", metaFile);
+
+            if (!File.Exists(onnxPath) || !File.Exists(binPath))
+            {
+                throw new FileNotFoundException($"PatchCore asset files missing in Assets directory for {backboneName}. " +
+                                                $"Ensure {onnxFile} and {binFile} exist.");
+            }
+
+            // Read threshold from metadata JSON if available, otherwise default to 0.5f
+            float threshold = 0.5f;
+            if (File.Exists(metaPath))
+            {
+                string json = File.ReadAllText(metaPath);
+                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                if (doc.RootElement.TryGetProperty("threshold", out var elem))
+                {
+                    threshold = (float)elem.GetDouble();
+                }
+            }
+
+            _detector = new PatchCoreDetector(onnxPath, binPath, threshold);
+            _loadedBackbone = backboneName;
+            return _detector;
+        }
 
         // ══════════════════════════════════════════════════════
         //  SLIDER VALUE LABEL CALLBACKS
@@ -262,28 +323,25 @@ namespace copperInspection
                 }
             }
 
-            if (RadioPatchCoreR50.IsChecked == true || RadioPatchCoreR18.IsChecked == true)
-            {
-                MessageBox.Show("PatchCore support arrives in Phase 2 — use Color Difference for now.",
-                    "Not Yet Available", MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
-            }
+            // Determine Detection Mode
+            string detectionMethod = RadioPatchCoreR50.IsChecked == true ? "PatchCore-R50"
+                                   : RadioPatchCoreR18.IsChecked == true ? "PatchCore-R18"
+                                   : "ColorDiff";
 
-            if (_referenceColor == null)
+            if (detectionMethod == "ColorDiff" && _referenceColor == null)
             {
                 MessageBox.Show($"No reference colour loaded (Assets\\{_config.ReferenceColorPath} missing or invalid).",
                     "Reference Colour Missing", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
 
-            // Snapshot every UI value now — the worker thread must never touch
-            // WPF controls directly.
+            // Snapshot parameters
             string targetPath = _imageFiles[TargetCombo.SelectedIndex];
             string? bgPath = useDiff ? _imageFiles[ReferenceCombo.SelectedIndex] : null;
 
             var silhouetteParams = new SilhouetteParams
             {
-                Flatten = _config.FlattenLighting,
+                Flatten = FlattenLightingCheck.IsChecked == true,
                 AutoThreshold = AutoThresholdCheck.IsChecked == true,
                 Threshold = (int)SilhouetteThresholdSlider.Value,
                 Morph = _config.SilhouetteMorphKernel,
@@ -299,16 +357,17 @@ namespace copperInspection
                 MatchExposure = _config.MatchExposure,
                 AllowResize = _config.AllowResize,
             };
+
             double colorThreshold = ColorThresholdSlider.Value;
             double colorMinAreaPct = ColorMinAreaSlider.Value;
             int colorMorph = _config.ColorDiffMorphKernel;
-            Scalar referenceBgr = _referenceColor.Bgr;
+            Scalar referenceBgr = _referenceColor?.Bgr ?? new Scalar(0, 0, 0);
 
             _config = CollectConfig();
             ConfigStore.Save(_config);
 
             SetBusy(true);
-            StatusLabel.Text = "Running pipeline…";
+            StatusLabel.Text = $"Running pipeline ({detectionMethod})…";
             ClearResults();
 
             Mat? original = null, bgSubtracted = null, heatmap = null, overlay = null;
@@ -324,6 +383,7 @@ namespace copperInspection
                     Mat target = ImageLoader.LoadResized(targetPath);
                     original = target;
 
+                    // 1. Background Subtraction Stage
                     BackgroundResult bgResult;
                     if (useDiff)
                     {
@@ -337,13 +397,31 @@ namespace copperInspection
                     bgNote = bgResult.Note;
                     bgSubtracted = bgResult.Result.Clone();
 
-                    using ColorDiffResult colorResult = ColorDiffDetector.Inspect(
-                        bgResult.Result, referenceBgr, colorThreshold, colorMinAreaPct, colorMorph);
-                    verdict = colorResult.Verdict;
-                    defectPct = colorResult.DefectPct;
-                    heatmap = ColorDiffDetector.DistanceHeatmap(
-                        bgResult.Result, colorResult.DistanceMap, colorResult.ContentMask);
-                    overlay = ColorDiffDetector.MaskOverlay(bgResult.Result, colorResult.DefectMask);
+                    // 2. Inspection Stage (PatchCore vs ColorDiff)
+                    if (detectionMethod.StartsWith("PatchCore"))
+                    {
+                        var detector = GetOrLoadDetector(detectionMethod);
+                        var (isDefect, score, patchHeatmap) = detector.Inspect(bgResult.Result);
+
+                        verdict = isDefect ? "BAD" : "GOOD";
+                        defectPct = score; // Using max anomaly score for PatchCore
+
+                        heatmap = patchHeatmap;
+
+                        // Build overlay: blend heatmap on top of background subtracted image
+                        overlay = new Mat();
+                        Cv2.AddWeighted(bgResult.Result, 0.6, heatmap, 0.4, 0, overlay);
+                    }
+                    else
+                    {
+                        using ColorDiffResult colorResult = ColorDiffDetector.Inspect(
+                            bgResult.Result, referenceBgr, colorThreshold, colorMinAreaPct, colorMorph);
+                        verdict = colorResult.Verdict;
+                        defectPct = colorResult.DefectPct;
+                        heatmap = ColorDiffDetector.DistanceHeatmap(
+                            bgResult.Result, colorResult.DistanceMap, colorResult.ContentMask);
+                        overlay = ColorDiffDetector.MaskOverlay(bgResult.Result, colorResult.DefectMask);
+                    }
 
                     bgResult.Dispose();
                 }
@@ -370,7 +448,7 @@ namespace copperInspection
             Cam2TargetImage.Source = MatToBmp(heatmap);
             Cam2ResultImage.Source = MatToBmp(overlay);
 
-            // ── Save report to MongoDB (encode while the Mat is still alive) ──
+            // ── Save report to MongoDB ──
             try
             {
                 Cv2.ImEncode(".png", overlay, out byte[] png);
@@ -378,7 +456,7 @@ namespace copperInspection
                 {
                     Timestamp = DateTime.UtcNow,
                     DefectCount = verdict == "BAD" ? 1 : 0,
-                    Method = "ColorDiff",
+                    Method = detectionMethod,
                     Mode = useDiff ? "ReferenceDiff" : "Silhouette",
                     ReferenceImage = useDiff ? (ReferenceCombo.SelectedItem as string ?? string.Empty) : string.Empty,
                     TargetImage = TargetCombo.SelectedItem as string ?? string.Empty,
@@ -396,13 +474,15 @@ namespace copperInspection
 
             if (verdict == "BAD")
             {
-                DefectCountLabel.Text = $"⚠  BAD  ({defectPct:F2}% defect area)";
+                string subLabel = detectionMethod.StartsWith("PatchCore") ? $"Score: {defectPct:F3}" : $"{defectPct:F2}% defect area";
+                DefectCountLabel.Text = $"⚠ BAD ({subLabel})";
                 DefectBadge.Visibility = Visibility.Visible;
                 OkBadge.Visibility = Visibility.Collapsed;
             }
             else if (verdict == "GOOD")
             {
-                OkBadgeLabel.Text = $"✓  GOOD  ({defectPct:F2}% defect area)";
+                string subLabel = detectionMethod.StartsWith("PatchCore") ? $"Score: {defectPct:F3}" : $"{defectPct:F2}% defect area";
+                OkBadgeLabel.Text = $"✓ GOOD ({subLabel})";
                 DefectBadge.Visibility = Visibility.Collapsed;
                 OkBadge.Visibility = Visibility.Visible;
             }
@@ -413,7 +493,7 @@ namespace copperInspection
             }
 
             string modeNote = useDiff ? "reference-image diff" : "silhouette";
-            StatusLabel.Text = $"Done — {verdict}  ·  {modeNote}{(string.IsNullOrEmpty(bgNote) ? "" : "  ·  " + bgNote)}.";
+            StatusLabel.Text = $"Done — {verdict} · {modeNote}{(string.IsNullOrEmpty(bgNote) ? "" : " · " + bgNote)}.";
         }
 
         // ══════════════════════════════════════════════════════

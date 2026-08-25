@@ -263,6 +263,9 @@
 
                         <!-- Silhouette params -->
                         <StackPanel x:Name="SilhouettePanel">
+                            <CheckBox x:Name="FlattenLightingCheck" Content="Even Out Lighting"
+                                      IsChecked="True" Foreground="#C0C0E0" FontSize="11"
+                                      Margin="0,0,0,8"/>
                             <CheckBox x:Name="AutoThresholdCheck" Content="Auto Threshold (Otsu)"
                                       IsChecked="True" Foreground="#C0C0E0" FontSize="11"
                                       Margin="0,0,0,8" Checked="AutoThresholdCheck_Changed"
@@ -322,12 +325,12 @@
                                      GroupName="DetMethod"
                                      Checked="DetMethod_Checked"/>
                         <RadioButton x:Name="RadioPatchCoreR50"
-                                     Content="PatchCore — ResNet50 (Phase 2)"
+                                     Content="PatchCore — ResNet50"
                                      Style="{StaticResource RadioBtn}"
                                      GroupName="DetMethod"
                                      Checked="DetMethod_Checked"/>
                         <RadioButton x:Name="RadioPatchCoreR18"
-                                     Content="PatchCore — ResNet18 (Phase 2)"
+                                     Content="PatchCore — ResNet18"
                                      Style="{StaticResource RadioBtn}"
                                      GroupName="DetMethod"
                                      Checked="DetMethod_Checked"
