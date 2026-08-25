@@ -6,19 +6,28 @@
 > from scratch — what the app is, how it's built, what already works, what's
 > stubbed out, and what's planned next. Point it at specific files with
 > `[filename.cs](path)`-style requests once it has this context.
+>
+> For the chronology of how the app got to this point (what changed, in what
+> order, and why), see [WORK_LOG.md](WORK_LOG.md) — that file also has a full
+> step-by-step trace of the PatchCore-ResNet18 detection run. This file is
+> the current-state snapshot; that one is the history.
 
 ---
 
 ## 1. What this app is
 
 `copperInspection` is a **Windows desktop app (WPF, .NET, C#)** that inspects
-copper strip images for surface defects by comparing a target image against a
-known-good reference image. It's a **C#/WPF port of a Python/Streamlit/OpenCV
-prototype** (`detect_defects_color_roi.py` / `detect_defects_ref_gui.py`,
-which live outside this repo). The porting rationale and translation map are
-in [WPF_Conversion_Guide.md](WPF_Conversion_Guide.md).
+copper strip images for surface defects. It's a **C#/WPF port of Python
+prototypes** (`bg_subtraction_app.py` and `color_diff_inspector.py`, which
+live outside this repo). Given one or two photos of a backlit component, it
+isolates the component from its background, then flags defects either by
+color deviation from a saved reference color or by anomaly score from a
+PatchCore ML model.
 
-There is no git repository initialized here yet (`git init` has not been run).
+There is a git repository (`main` branch); recent history: background
+subtraction + color-diff pipeline was a full rewrite of an earlier
+manual-ROI-cropper prototype, then PatchCore-ResNet18 detection was added on
+top. See [WORK_LOG.md](WORK_LOG.md) for details.
 
 ---
 
@@ -28,9 +37,9 @@ There is no git repository initialized here yet (`git init` has not been run).
 |---|---|
 | UI | WPF, `net10.0-windows`, `x64` |
 | Computer vision | **OpenCvSharp4** (`OpenCvSharp4`, `.runtime.win`, `.WpfExtensions`) — see [NUGET_PACKAGES.md](NUGET_PACKAGES.md) |
+| ML inference | **Microsoft.ML.OnnxRuntime** 1.29.0 — runs the PatchCore ResNet18 backbone |
 | Storage | **MongoDB** (`MongoDB.Driver`), local instance at `mongodb://localhost:27017`, db `defect_detection_db`, collection `reports` |
-| Camera SDK | **Baumer neoAPI** 1.6.0 — referenced in the `.csproj` but **not yet used anywhere in code** (see §5) |
-| ML (planned) | PatchCore anomaly-detection model, exported to `Assets/patchcore.onnx` — **not yet wired into the app** (see §5) |
+| Camera SDK | none currently referenced — earlier camera-mode planning docs in `Assets/` are aspirational, not implemented |
 
 Full package list/versions: [copperInspection.csproj](../copperInspection.csproj).
 
@@ -41,140 +50,105 @@ Full package list/versions: [copperInspection.csproj](../copperInspection.csproj
 ```
 copperInspection/
 ├── copperInspection.csproj        # net10.0-windows, WPF, x64
+├── config.json                    # hand-editable pipeline defaults (next to the .exe, not %AppData%)
 ├── App.xaml / App.xaml.cs         # stock WPF entry point, nothing custom
-├── MainWindow.xaml(.cs)           # the one real screen — see §4
+├── MainWindow.xaml(.cs)           # the one screen — folder/image pick, mode radios, run, results
 ├── ReportsWindow.xaml(.cs)        # gallery of saved inspection reports (MongoDB)
-├── RoiCropper.xaml(.cs)           # reusable draggable/resizable ROI-box control
-├── DefectDetector.cs              # pure CV pipeline (no UI) — the core logic
-├── RedRoiExtractor.cs             # HSV red-strip auto-segmentation (for the disabled "Auto ROI" mode)
+├── PipelineConfig.cs              # PipelineConfig model + ConfigStore (loads/saves config.json)
+├── BackgroundSubtraction.cs       # Stage 1: isolate the component from its backlit background
+├── Detection/
+│   ├── ColorDiffDetector.cs       # Stage 2 option A: per-pixel distance from a saved reference colour
+│   └── PatchCoreDetector.cs       # Stage 2 option B: ONNX PatchCore anomaly detector (ResNet18 backbone)
+├── DefectDetector.cs              # now just ImageLoader.LoadResized() — shared image-loading helper
 ├── ReportStore.cs                 # MongoDB model (DefectReport) + queries
-├── Settings.cs                    # JSON settings persisted to %AppData%\copperInspection\settings.json
 ├── BytesToImageConverter.cs       # WPF IValueConverter: byte[] PNG -> Image thumbnail
 ├── Assets/
-│   ├── memory_bank.pkl            # trained PatchCore model (Python pickle — not usable from C# as-is)
-│   ├── patchcore.onnx             # PatchCore ALREADY exported to ONNX (37 MB) — ready for ONNX Runtime, unused so far
-│   ├── patchcore_onnx_meta.json   # preprocessing recipe + threshold for the ONNX model (see §5.2)
-│   ├── CAMERA_PATCHCORE_INTEGRATION.md  # design doc: camera mode + PatchCore options
+│   ├── reference_color.json / reference_color1.json   # saved reference BGR colour + ColorDiff params
+│   ├── patchcore_resnet18_meta.json   # threshold + memory-bank dims for the R18 model
+│   ├── patchcore_resnet18.onnx(.data) # ONNX backbone graph + weights — gitignored, local/shared-storage only
+│   ├── patchcore_resnet18_bank.bin    # ~157 MB memory bank (102,400 × 384 float32) — gitignored
+│   ├── CAMERA_PATCHCORE_INTEGRATION.md  # early design notes on camera mode (not implemented)
 │   └── PATCHCORE_CODE_EXPLAINED.md      # line-by-line explanation of the Python PatchCore trainer/exporter
 └── docs/
-    ├── WPF_Conversion_Guide.md            # Python→WPF porting notes + codegen prompt used to bootstrap this app
-    ├── NUGET_PACKAGES.md                  # OpenCvSharp4 package/version notes
-    ├── detect_defects_color_roi_explained.md  # walkthrough of the ORIGINAL Streamlit script this app replicates
-    ├── prompts.txt                        # (empty)
-    └── PROJECT_CONTEXT.md                 # this file
+    ├── WORK_LOG.md                 # chronology + PatchCore-R18 run flowchart — read this too
+    ├── PROJECT_CONTEXT.md          # this file
+    ├── NUGET_PACKAGES.md           # OpenCvSharp4 package/version notes
+    ├── WPF_Conversion_Guide.md     # historical: notes from the ORIGINAL manual-ROI port (superseded pipeline)
+    ├── detect_defects_color_roi_explained.md  # historical: walkthrough of the superseded Streamlit script
+    └── prompts.txt                 # (empty)
 ```
 
----
-
-## 4. What actually works today (Manual mode)
-
-The app currently has **one working end-to-end flow**: manual, offline,
-folder-based image inspection.
-
-1. **Browse Folder** — pick any image in a folder; the app lists all
-   `.png/.jpg/.jpeg/.bmp/.tif/.tiff/.webp` files in that folder
-   ([MainWindow.xaml.cs](../MainWindow.xaml.cs) `LoadImagesFromFolder`).
-2. Pick a **Reference** and a **Target** image from two dropdowns. Each loads
-   into a [RoiCropper](../RoiCropper.xaml.cs) — a draggable/resizable ROI box
-   the user drags over the "good copper" patch (reference, blue box) and the
-   "area to inspect" (target, green box), mirroring the original Streamlit
-   `st_cropper` widget.
-3. Pick a **Detection Method** (radio buttons, mutually exclusive):
-   - **Color Deviation (Euclidean)** — mean RGB of the reference ROI vs.
-     per-pixel Euclidean distance in the target ROI.
-   - **Channel Statistics (Z-Score)** — per-channel mean/std from the
-     reference ROI; flag pixels whose Z-score exceeds a threshold in *any*
-     channel.
-   - **Self-Reference (Legacy)** — same as Euclidean but the target ROI is
-     compared against *its own* mean color (reference ROI ignored).
-4. Tune sliders (blur, threshold, morphology kernel, min contour area) and hit
-   **Run Detection**. The pipeline (blur → per-method distance/Z-score →
-   threshold → morphology open+dilate → find contours → filter by area →
-   draw green boxes) runs on a background `Task` — see
-   [DefectDetector.cs](../DefectDetector.cs) `Detect()`.
-5. Results render in the right-hand image grid, a defect-count badge shows,
-   and a `DefectReport` (result PNG + metadata) is saved to MongoDB
-   ([ReportStore.cs](../ReportStore.cs)) — fire-and-forget, failure only
-   shows a status-bar message, never blocks the UI.
-6. **Options → Reports** opens a modeless gallery window
-   ([ReportsWindow.xaml.cs](../ReportsWindow.xaml.cs)) showing the last 6
-   reports or a date-range query, with per-card view/download and
-   download-all. New detections push live into an already-open Reports
-   window via `AddLiveReport`.
-7. All slider/radio/folder state persists to
-   `%AppData%\copperInspection\settings.json` between launches
-   ([Settings.cs](../Settings.cs)).
-
-Behavioral note ported from the original: the original Streamlit script has a
-small bug where the brightness-filter ROI uses the *unaligned* target rather
-than the aligned one — see §4 of
-[WPF_Conversion_Guide.md](WPF_Conversion_Guide.md#4-note-on-a-quirk-in-the-original)
-if exact parity with the Python original ever matters.
+`WPF_Conversion_Guide.md` and `detect_defects_color_roi_explained.md`
+describe the **manual-ROI-cropper pipeline that no longer exists** in this
+repo (`RoiCropper`, `RedRoiExtractor`, the old `DefectDetector.Detect()` with
+Euclidean/Z-score/legacy methods were all removed). They're kept for
+historical reference only — don't use them to understand current behavior.
 
 ---
 
-## 5. What's designed but NOT wired up yet
+## 4. What actually works today
 
-### 5.1 "Auto Red ROI" pipeline mode
-[DefectDetector.cs](../DefectDetector.cs) and
-[RedRoiExtractor.cs](../RedRoiExtractor.cs) already fully implement a second
-`PipelineMode.AutoRoi` — HSV segmentation that auto-finds a red strip in the
-frame (instead of a user-dragged ROI) and adds aspect-ratio + glare
-(brightness) filtering on top of area filtering. **The UI toggle for it is
-commented out** in [MainWindow.xaml:256-261](../MainWindow.xaml). Turning it
-back on is mostly a XAML uncomment + wiring `RadioAuto` — the C# and detection
-logic are already there and already branch on `p.Mode`.
+The app has **one screen, two independent pipeline stages**, each with two
+interchangeable methods, both save results to MongoDB:
 
-### 5.2 Camera / live-stream mode + PatchCore anomaly detection
-The two-camera image grid in `MainWindow.xaml` (`Cam1TargetImage` /
-`Cam1ResultImage` / `Cam2TargetImage` / `Cam2ResultImage`) is laid out to
-anticipate a **live camera mode**, but today Cam2 just mirrors Cam1's
-manual-mode result — there is no actual second camera feed, and `neoAPI`
-(Baumer camera SDK, already in the `.csproj`) is **not referenced anywhere in
-the C# code yet**.
+**Stage 1 — Background Subtraction** (radio group, `MainWindow.xaml`):
+- **Silhouette** (default) — one image; the component is dark against a
+  bright backlit field, so Otsu (or manual) threshold on the inverted
+  grayscale isolates it. Optional illumination flattening, morphological
+  cleanup, keep-N-largest-blobs, hole filling.
+- **Reference-Image Diff** — two images (target + a background plate);
+  `absdiff` after exposure-matching (median-brightness gain), then threshold
+  + cleanup. Requires both images be pixel-aligned and the same size unless
+  "Allow Resize" is set.
 
-The plan (fully written up in
-[Assets/CAMERA_PATCHCORE_INTEGRATION.md](../Assets/CAMERA_PATCHCORE_INTEGRATION.md)):
+Implementation: [BackgroundSubtraction.cs](../BackgroundSubtraction.cs).
 
-| Mode | Input | Pipeline |
-|---|---|---|
-| Manual (done) | Folder-browsed image | `DefectDetector.Detect()` — no changes needed |
-| Camera (not built) | Live Baumer neoAPI frames | **PatchCore** anomaly detection against a pretrained memory bank |
+**Stage 2 — Detection method** (radio group):
+- **Color Difference** (default) — every kept pixel's Euclidean distance from
+  a saved reference BGR colour (`Assets/reference_color1.json`), thresholded,
+  cleaned, verdict = `BAD` if the defect area exceeds a % of the component
+  area. Produces a real heatmap + mask overlay.
+  Implementation: [Detection/ColorDiffDetector.cs](../Detection/ColorDiffDetector.cs).
+- **PatchCore — ResNet18** — ONNX-based anomaly detection against a
+  pretrained memory bank; verdict = `BAD` if the worst 256×256-tile patch
+  score exceeds a saved threshold. **Full step-by-step trace of this path is
+  in [WORK_LOG.md §3](WORK_LOG.md#3-flow-chart--selecting-patchcore--resnet18-and-clicking-run-detection).**
+  Implementation: [Detection/PatchCoreDetector.cs](../Detection/PatchCoreDetector.cs).
+- **PatchCore — ResNet50** — radio button exists, wired to look for
+  `patchcore_resnet50.*` assets, but those files don't exist yet; selecting
+  it and running throws a caught `FileNotFoundException` (shown as a
+  MessageBox, non-fatal). **Not usable yet.**
 
-PatchCore background, in brief (full explanation in
-[Assets/PATCHCORE_CODE_EXPLAINED.md](../Assets/PATCHCORE_CODE_EXPLAINED.md)):
-a ResNet18 backbone turns an image into a 28×28 grid of 384-dim "patch
-fingerprints"; each patch's anomaly score is its distance to the nearest
-fingerprints in a memory bank built from known-good images; the image score is
-the worst patch's score; `score > threshold` ⇒ defect, with a heatmap for
-free.
+Click **Run Detection** (`RunBtn_Click` in
+[MainWindow.xaml.cs](../MainWindow.xaml.cs)) runs both stages on a background
+`Task`, then:
+- Shows 4 result panels (original, background-subtracted, heatmap/distance,
+  overlay/mask).
+- Shows a red "BAD" or green "GOOD" badge with a score/percentage.
+- Saves a `DefectReport` (result PNG + metadata) to MongoDB
+  ([ReportStore.cs](../ReportStore.cs)) — fire-and-forget; failure only shows
+  a status-bar message, never blocks the UI.
+- Live-pushes the new report into an already-open Reports window
+  (`Options → Reports`, [ReportsWindow.xaml.cs](../ReportsWindow.xaml.cs)) if
+  one is open.
 
-**Current state of that model:**
-- `Assets/memory_bank.pkl` — the original Python-trained model (pickle, not
-  loadable from .NET).
-- `Assets/patchcore.onnx` (already exported, ~37 MB) + `Assets/patchcore_onnx_meta.json`
-  — a **self-contained ONNX graph** (backbone + memory bank + k-NN scoring +
-  threshold baked in) that **is** loadable from .NET via
-  `Microsoft.ML.OnnxRuntime` (not yet added to the `.csproj`). Per
-  `patchcore_onnx_meta.json`: input `float32 (1,3,224,224)` RGB,
-  ImageNet-normalized (resize short side to 256 → center-crop 224 → `/255` →
-  normalize mean `[0.485,0.456,0.406]` std `[0.229,0.224,0.225]`); outputs
-  `score`, `anomaly_map (224×224)`, `threshold` (= `0.6286286314328512`);
-  verdict is `score > threshold`.
-- This is **"Option B" from the integration doc** (ONNX + C#, no Python at
-  runtime) and the model-export half of it is already done — what remains is
-  the C# side: `Microsoft.ML.OnnxRuntime` NuGet, an image-preprocessing
-  helper matching the meta.json recipe exactly, and wiring `InferenceSession`
-  results into a live camera loop. The doc also describes an alternative
-  "Option A" (Python sidecar process) if that's ever preferred instead —
-  weigh both against current needs before picking; Option B's model is
-  already exported so it's the shorter path today.
-- Camera capture itself (`neoAPI`) still needs to be written from scratch:
-  grab frame → PatchCore inference → update live image + GOOD/BAD badge +
-  heatmap overlay → on defect, save a `DefectReport` to MongoDB and
-  live-push it to an open Reports window, all on a background task so the UI
-  thread stays responsive. See §8 of the integration doc for the exact wiring
-  checklist.
+All pipeline defaults + the last-used folder persist to `config.json` next to
+the `.exe` (see [PipelineConfig.cs](../PipelineConfig.cs)) — intentionally
+hand-editable, not hidden in `%AppData%`.
+
+---
+
+## 5. Known gaps (see [WORK_LOG.md §4](WORK_LOG.md#4-known-gaps--rough-edges-worth-knowing-about) for detail)
+
+- PatchCore's heatmap/overlay panels are currently a blank placeholder — the
+  per-tile anomaly grids are computed but not stitched back into a visual map.
+- PatchCore-ResNet50 has UI but no shipped model files.
+- PatchCore's 256px tiling has no overlap and drops edge remainders.
+- The ONNX + memory-bank files (~157 MB total) are gitignored — must be
+  copied into `Assets/` manually on any machine that doesn't already have
+  them; they don't come with `git clone`.
+- No camera/live-stream mode exists yet — `Assets/CAMERA_PATCHCORE_INTEGRATION.md`
+  is planning-only.
 
 ---
 
@@ -186,12 +160,12 @@ free.
 |---|---|---|
 | `Id` | ObjectId | Mongo `_id` |
 | `Timestamp` | DateTime | stored UTC |
-| `DefectCount` | int | |
-| `Method` | string | enum name, e.g. `ColorDeviationEuclidean` |
-| `Mode` | string | `"Manual"` or `"Auto"` |
-| `ReferenceImage` / `TargetImage` | string | filenames only |
-| `ImageData` | byte[] | result PNG (boxes drawn), raw bytes |
-| `ResultImageBase64` | string | same PNG as a `data:image/png;base64,...` URI for quick viewing outside the app |
+| `DefectCount` | int | `1` if verdict is BAD, else `0` (not a real defect count anymore — both current methods produce a single whole-image verdict) |
+| `Method` | string | `"ColorDiff"`, `"PatchCore-R18"`, or `"PatchCore-R50"` |
+| `Mode` | string | `"Silhouette"` or `"ReferenceDiff"` (background-subtraction method used) |
+| `ReferenceImage` / `TargetImage` | string | filenames only; `ReferenceImage` empty unless Reference-Image-Diff mode was used |
+| `ImageData` | byte[] | overlay result PNG, raw bytes |
+| `ResultImageBase64` | string | same PNG as a `data:image/png;base64,...` URI |
 
 Connection string / db / collection names are constants at the top of
 `ReportStore.cs` — change there if Mongo runs elsewhere. **A local MongoDB
@@ -211,44 +185,45 @@ dotnet run --project copperInspection.csproj
 
 For MongoDB-backed features (saving/viewing reports), a local MongoDB server
 must be reachable at `mongodb://localhost:27017` (see §6 to point elsewhere).
-No camera or Python runtime is required for anything that currently works —
-those are only needed once §5.2 is implemented.
+For PatchCore-R18 to work, `Assets/patchcore_resnet18.onnx`,
+`.onnx.data`, and `patchcore_resnet18_bank.bin` must be present on disk
+(gitignored — see §5).
 
 ---
 
 ## 8. Conventions worth knowing before editing
 
-- `Mat` (OpenCvSharp) ownership: `DefectDetector.Detect()` does **not** dispose
-  the ref/target Mats passed in (caller owns them — `MainWindow` caches
-  `_refMat`/`_targetMat` and disposes on window close or when swapping
-  images). `DetectionResult` **does** own and dispose its own Mats via
-  `IDisposable` — always call `.Dispose()` (or scope with `using`) once
-  you've extracted what you need (see how `MainWindow.RunBtn_Click` reads
-  scalar fields *before* disposing `result`).
+- `Mat` (OpenCvSharp) ownership: results from `BackgroundSubtraction`/
+  `ColorDiffDetector`/`PatchCoreDetector` are `IDisposable` — always dispose
+  once you've extracted what you need. `MainWindow.RunBtn_Click` reads
+  scalar/verdict fields *before* disposing the Mats it built for display.
 - UI dark theme is hand-rolled in `MainWindow.xaml`'s `<Window.Resources>`
   (custom `ComboBox`/`Button` control templates) rather than a theme library
   — match that style if adding controls.
-- Settings persistence (`Settings.cs`) is intentionally best-effort (swallows
-  I/O exceptions) — keep new persisted fields optional/nullable-safe so old
-  settings files don't break on upgrade.
-- `RadioManual` is currently forced checked in code
-  (`ApplySettings`/`MainWindow` constructor) since Auto mode's radio button is
-  commented out — remember to re-enable the persisted `Mode` setting's other
-  branch if you restore Auto mode in the UI.
+- `config.json` persistence (`PipelineConfig.cs`) is intentionally
+  best-effort (swallows I/O exceptions) — keep new persisted fields
+  optional/nullable-safe so old config files don't break on upgrade.
+- Large model artifacts (`*.onnx`, `*.onnx.data`, `*.pt`, `*.pth`, `*.pkl`,
+  `Assets/*.bin`) are gitignored on purpose (GitHub's 100 MB/file limit) —
+  don't try to `git add -f` them; document where they live on shared storage
+  instead.
+- `PatchCoreDetector` caches one loaded model per backbone name
+  (`GetOrLoadDetector` in `MainWindow.xaml.cs`) — switching between R18/R50
+  disposes and reloads; switching back and forth repeatedly reloads the ONNX
+  session + 157 MB bank each time, which is slow. Fine for now given only R18
+  is usable.
 
 ---
 
-## 9. Suggested next steps (pick based on what's asked)
+## 9. Suggested next steps
 
-1. **Re-enable Auto Red ROI mode** — uncomment `RadioAuto` in
-   `MainWindow.xaml`, confirm `Mode_Checked`/`CollectSettings` round-trip it
-   correctly. Low effort, logic already exists.
-2. **Wire up `Microsoft.ML.OnnxRuntime` + `Assets/patchcore.onnx`** for a
-   "test single image against PatchCore" button, before tackling live camera
-   — validates preprocessing correctness against `patchcore_onnx_meta.json` in
-   isolation.
-3. **Baumer neoAPI camera capture** — a minimal live-preview window/mode
-   first (no inference), then fold in PatchCore scoring per the pipeline
-   diagram in `CAMERA_PATCHCORE_INTEGRATION.md`.
-4. **Second camera / dual-cam support** — `Cam2*` UI elements exist but need
-   a real second camera source; currently just mirrors Cam1.
+1. **Implement the real PatchCore heatmap** — stitch `ComputeAnomalyScores`'s
+   per-tile grids back into a full-image anomaly map instead of returning a
+   blank Mat (see `WORK_LOG.md` §4 for exactly where this is stubbed).
+2. **Export and ship PatchCore-ResNet50** assets so that radio option is
+   actually usable.
+3. **Overlapping/full-coverage tiling** for `Extract256Patches` so edge
+   regions aren't silently skipped.
+4. **Camera / live-stream mode** — still just planning docs in `Assets/`;
+   would need a camera SDK dependency added and a capture loop written from
+   scratch.

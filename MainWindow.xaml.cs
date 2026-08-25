@@ -143,7 +143,7 @@ namespace copperInspection
         {
             var dlg = new OpenFileDialog
             {
-                Title = "Select any image inside the folder",
+                Title = "Select an image to inspect",
                 Filter = "Images (*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp)" +
                          "|*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp" +
                          "|All Files (*.*)|*.*",
@@ -151,11 +151,14 @@ namespace copperInspection
             };
             if (dlg.ShowDialog() != true) return;
 
+            // The dialog is used to pick a folder (via one file in it), but the
+            // actual file the user clicked is what should end up selected +
+            // previewed - not just whatever sorts first in that folder.
             _folderPath = Path.GetDirectoryName(dlg.FileName) ?? string.Empty;
-            LoadImagesFromFolder(_folderPath);
+            LoadImagesFromFolder(_folderPath, dlg.FileName);
         }
 
-        private void LoadImagesFromFolder(string folder)
+        private void LoadImagesFromFolder(string folder, string? selectedFile = null)
         {
             _imageFiles = Directory
                 .EnumerateFiles(folder, "*.*", SearchOption.TopDirectoryOnly)
@@ -175,18 +178,46 @@ namespace copperInspection
             TargetCombo.ItemsSource = null;
             ReferenceCombo.ItemsSource = names;
             TargetCombo.ItemsSource = names;
-            TargetCombo.SelectedIndex = 0;
-            if (names.Count > 1) ReferenceCombo.SelectedIndex = 1;
+
+            // Default to whichever file the user actually clicked in the Browse
+            // dialog, not just the alphabetically-first file in the folder.
+            int targetIndex = 0;
+            if (selectedFile != null)
+            {
+                string selectedName = Path.GetFileName(selectedFile);
+                int idx = names.FindIndex(n => string.Equals(n, selectedName, StringComparison.OrdinalIgnoreCase));
+                if (idx >= 0) targetIndex = idx;
+            }
+            TargetCombo.SelectedIndex = targetIndex;   // fires TargetCombo_SelectionChanged -> previews it
+            if (names.Count > 1)
+                ReferenceCombo.SelectedIndex = targetIndex == 0 ? 1 : 0;
 
             FolderPathLabel.Text = $"{folder}  ({_imageFiles.Count} images)";
             StatusLabel.Text = $"Loaded {_imageFiles.Count} images.";
-            ClearResults();
         }
 
         private void TargetCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
         {
-            // Selection alone doesn't need to do anything until Run is pressed -
-            // images are loaded fresh from disk at run time.
+            // Show the picked image immediately - don't make the operator click
+            // Run Detection just to confirm what they selected.
+            ClearResults();
+            PreviewSelectedTarget();
+        }
+
+        private void PreviewSelectedTarget()
+        {
+            if (TargetCombo.SelectedIndex < 0 || TargetCombo.SelectedIndex >= _imageFiles.Count)
+                return;
+
+            try
+            {
+                using Mat img = ImageLoader.LoadResized(_imageFiles[TargetCombo.SelectedIndex]);
+                Cam1TargetImage.Source = MatToBmp(img);
+            }
+            catch (Exception ex)
+            {
+                StatusLabel.Text = $"Failed to preview image: {ex.Message}";
+            }
         }
 
         // ══════════════════════════════════════════════════════
@@ -401,16 +432,17 @@ namespace copperInspection
                     if (detectionMethod.StartsWith("PatchCore"))
                     {
                         var detector = GetOrLoadDetector(detectionMethod);
-                        var (isDefect, score, patchHeatmap) = detector.Inspect(bgResult.Result);
+                        // overlayBase = the raw photo (pre-background-subtraction) -
+                        // slot 4 shows the heatmap blended onto THAT, not the
+                        // background-subtracted view.
+                        var (isDefect, score, heatmapRaw, heatmapOnOriginal) =
+                            detector.Inspect(bgResult.Result, target);
 
                         verdict = isDefect ? "BAD" : "GOOD";
                         defectPct = score; // Using max anomaly score for PatchCore
 
-                        heatmap = patchHeatmap;
-
-                        // Build overlay: blend heatmap on top of background subtracted image
-                        overlay = new Mat();
-                        Cv2.AddWeighted(bgResult.Result, 0.6, heatmap, 0.4, 0, overlay);
+                        heatmap = heatmapRaw;       // slot 3 - pure anomaly heatmap
+                        overlay = heatmapOnOriginal; // slot 4 - heatmap blended onto the original image
                     }
                     else
                     {

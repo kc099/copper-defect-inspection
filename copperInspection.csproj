@@ -38,6 +38,15 @@
   <ItemGroup>
     <!-- Hand-editable pipeline config - lives next to the .exe, not %AppData%,
          and PreserveNewest so an operator's edits survive a rebuild. -->
+    <None Update="Assets\patchcore_resnet50.onnx">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Assets\patchcore_resnet50_bank.bin">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Assets\patchcore_resnet50_meta.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
     <None Update="Assets\reference_color1.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
