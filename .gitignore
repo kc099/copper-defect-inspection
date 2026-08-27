@@ -19,9 +19,9 @@ obj/
 # GitHub hard-rejects anything over 100MB per file. Keep these on shared
 # storage instead; Assets/reference_color.json (small, needed to run) and
 # config.json stay tracked.
-# *.onnx
-# *.onnx.data
-# *.pt
+*.onnx
+*.onnx.data
+*.pt
 *.pth
 *.pkl
 Assets/*.bin

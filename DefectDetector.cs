@@ -11,6 +11,23 @@ namespace copperInspection
 
         public static Mat LoadResized(string path) => LoadAndResize(path, DisplayWidth);
 
+        /// <summary>Loads at native resolution, no resize at all. Needed for
+        /// PatchCore: BackgroundSubtraction's morphology kernels are a fixed
+        /// pixel size (e.g. 5x5), so they erode/smooth proportionally more on
+        /// a downscaled image than on the original - which segments the
+        /// image differently than however the Python reference tooling
+        /// (which never resizes before segmenting) produced the images the
+        /// model was actually trained/calibrated on. Confirmed empirically:
+        /// the same image+settings scored GOOD at native resolution and BAD
+        /// at 800px-wide. See docs/WORK_LOG.md.</summary>
+        public static Mat LoadFull(string path)
+        {
+            Mat img = Cv2.ImRead(path, ImreadModes.Color);
+            if (img.Empty())
+                throw new InvalidOperationException($"Cannot load image: {path}");
+            return img;
+        }
+
         private static Mat LoadAndResize(string path, int maxWidth)
         {
             Mat img = Cv2.ImRead(path, ImreadModes.Color);

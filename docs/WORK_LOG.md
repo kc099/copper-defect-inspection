@@ -226,6 +226,212 @@ amount of further code fixing resolves this. It needs a retrain on a real,
 diverse set of distinct good-part photos before PatchCore-R18's accuracy can
 actually be evaluated fairly.
 
+### PatchCore-ResNet50 calibration saga (Aug 26, 2026 — today)
+
+A second backbone, PatchCore-ResNet50, was added (new radio bubble already
+existed in the UI, previously unusable — see §4). Getting it to produce
+correct verdicts took three rounds, each uncovering a different bug. Noting
+all three here since they weren't logged in real time.
+
+**Round 1 — units mismatch (`Threshold` never actually used correctly).**
+Symptom: every sample, including defective ones, read GOOD. Cause:
+`MainWindow.xaml.cs` constructed `PatchCoreDetector` with a bare `threshold`
+float; a `LoadMetadata()` method existed to read `image_min`/`image_max` from
+the meta.json but **nothing ever called it**, so those fields stayed at their
+hardcoded defaults (`0`/`1`) forever. Combined with comparing a
+normalized-to-`[0,1]` score against the raw (un-normalized) `Threshold`
+(`6.8066`), every real ResNet50 distance (~15–45) clamped to `1.0`, and
+`1.0 > 6.8066` is never true. Fix: consolidated all metadata loading into the
+constructor (now takes `metaPath`, not a bare float), and made the threshold
+go through the *same* transform as the score before comparing — mathematically
+equivalent to comparing the two raw values directly, so it's correct
+regardless of a backbone's raw-distance scale.
+
+**Round 2 — wrong key read for the threshold, in the Python export script
+itself.** After round 1's fix, verdicts were still off. Traced into
+`D:\copper_bgsubtraction\copper\Train\export_patchcore_to_onnx.py`: the real
+Anomalib checkpoint stores the calibrated decision threshold under
+`post_processor._image_threshold` (`6.9896`), a **different** value from
+`post_processor.image_min` (`6.8066`) — but the export script read
+`image_min` and assigned it directly to `threshold`, so the JSON's threshold
+was never the real one. This made the normalized threshold always compute to
+exactly `0`. Fixed the export script to read the correct key (falling back to
+`image_min` only if a checkpoint variant lacks it), and regenerated just
+`patchcore_resnet50_meta.json` (no need to re-export the 90MB ONNX
+graph/bank — those were already correct).
+
+**Round 3 — the actual dominant bug: wrong preprocessing pipeline entirely.**
+Even with a correct threshold, real raw distances (~50–55) were still
+~4× the calibration range (6.8–13.6). The proposed fix at this point was to
+divide the raw distance by a hand-fitted constant (`sqrt(dim/50)`, or
+literally `/7.50f`, reverse-engineered from one sample's numbers) — rejected,
+because a curve-fit constant doesn't generalize and doesn't explain *why*
+the mismatch exists. Instead, traced into the installed `anomalib` package
+directly (`site-packages/anomalib/models/image/patchcore/`) and found the
+real cause: `PatchCoreDetector.cs` was preprocessing every image with
+ResNet18's recipe (`sample_patchcore.py`'s content-crop + letterbox/tile) —
+but this ResNet50 model was trained by **real Anomalib**
+(`Train/trainer.py` → `anomalib.models.Patchcore`), whose actual
+pre-processor (`Patchcore.configure_pre_processor` in
+`lightning_model.py`) is a single `torchvision Resize((256,256))` applied to
+the **whole frame** — no content-crop, no tiling, aspect ratio squashed if
+needed. Feeding the model multiple oddly-cropped tiles instead of one
+whole-frame-squashed image produces embeddings that look "foreign" to the
+memory bank regardless of the actual image content — that's what was
+inflating every raw distance. A second, smaller effect was also missing:
+Anomalib's real `PatchcoreModel.compute_anomaly_score`
+(`torch_model.py`) doesn't just take the worst patch's raw distance when
+`num_neighbors > 1` — it re-weights that distance by a softmax factor
+computed from the local neighbourhood of the best-matching memory-bank patch,
+and `Train/trainer.py` trains this model with `num_neighbors=9`.
+
+**The fix**, in [Detection/PatchCoreDetector.cs](../Detection/PatchCoreDetector.cs):
+the detector now runs one of two genuinely different pipelines, selected
+automatically by whether a backbone's meta.json carries `image_min`/
+`image_max` (`_useAnomalibPipeline`):
+- **ResNet18** (no `image_min`/`image_max`): unchanged — `PreprocessToTiles`
+  (content-crop + letterbox/tile) and a plain worst-patch-across-all-tiles
+  score, matching `sample_patchcore.py` exactly (as established in the
+  earlier correctness fix above).
+- **ResNet50** (has `image_min`/`image_max`): new `PreprocessSingleResize`
+  (one whole-frame resize to 256×256, no crop, no tiling) plus a new
+  `ReweightScore` that ports Anomalib's `num_neighbors=9` softmax
+  reweighting exactly. Normalization now happens **once**, on the final
+  (reweighted) image-level score — not per-patch as the two earlier rounds
+  had it — matching where Anomalib's own min-max normalizer actually sits.
+
+Both pipelines share the same ONNX inference, 3×3 smoothing, and bilinear
+layer-alignment code (`ExtractFeaturesBatch`/`SplitBatchAndAlign`/
+`Smooth3x3`/`BilinearResize`) — those were already correct for both
+backbones and untouched by this fix.
+
+**Round 4 — the ONNX export never loaded the real trained weights.** Even
+with round 3's fix, raw scores (~2900) were still ~100× outside the
+calibrated range. The proposed next step was another hand-fitted scaling
+constant (`Math.Sqrt`, `/√2560`) — rejected for the same reason as round 3's
+rejected fix: the arithmetic didn't even reach the claimed target, and a
+curve-fit constant explains nothing. Instead, compared the ONNX file's actual
+`conv1.weight` values against the checkpoint's real trained weights and found
+`export_patchcore_to_onnx.py` builds the graph from `resnet50(weights=None)`
+— **randomly initialized** — and never calls `load_state_dict` to load the
+real trained backbone before `torch.onnx.export`. The exported model had been
+running a completely different, untrained network the entire time; no amount
+of algorithm fixing in C# could ever close that gap. Fixed by adding
+`load_backbone_weights()` to the export script (maps
+`model.feature_extractor.feature_extractor.*` checkpoint keys onto the export
+model) and verified numerically — not just by re-reading code — by running
+identical random input through both the corrected PyTorch model and the new
+ONNX file: outputs matched to ~1e-5 (float noise).
+
+**Round 5 — not a bug: a segmentation-threshold / training-mismatch, and a
+moving-target checkpoint that briefly confused the investigation.** After
+round 4's fix, a further "WPF says BAD, Python says GOOD" report surfaced.
+Two false leads first: (a) the checkpoint had genuinely been retrained
+mid-investigation (`Train/patchcore_model.pt`'s mtime moved from the file the
+round-4 export had used), so for one round the two sides really were
+comparing different model versions — resolved by exporting from the actual
+current checkpoint; (b) the two comparison points turned out to use different
+segmentation settings (Python's GUI defaults to auto-threshold/Otsu + keep=2,
+independently of whatever the WPF app's `config.json` has saved), which
+alone produces different scores from a correctly-behaving system on either
+side — not a code discrepancy. Once both were confirmed matched (same
+checkpoint, same `SilhouetteThreshold=100` manual setting, Auto Threshold
+unchecked in the WPF UI), the two **agreed**: a direct Python replication
+scored **every image in the test folder as BAD at threshold=100, including
+`good_reference.jpeg`** (the named golden reference). Conclusion: this
+particular trained model was calibrated on auto-threshold-segmented images,
+and its normal-score band (6.19–12.39, a memory bank built from
+auto-threshold training data) is narrow enough that a materially different
+fixed threshold (100 vs Otsu's ~92 for this rig) shifts every raw score well
+outside it, regardless of the actual part's condition. **Fix: none needed in
+code** — switch the WPF app's Background Subtraction to Auto Threshold
+(Otsu) so inference segmentation matches how this model was actually trained
+and calibrated. Whatever segmentation setting is used at inference must match
+training, or the model has no basis for recognizing a differently-segmented
+good part as normal — the same underlying lesson as every round before this
+one, just landing on a setting instead of a code path.
+
+### Backbone selector, recorded-settings auto-apply, and the antialiasing bug (Aug 27, 2026)
+
+Three changes, building directly on the round above's lesson ("inference
+segmentation must match training") by making it structural instead of a
+manual reminder:
+
+**1. ResNet18 can now train through real Anomalib.** `patchcore_gui_app.py`'s
+Train tab got a Backbone dropdown (ResNet-50 / ResNet-18), threaded through
+`SegmentThenTrainRunner` into `Patchcore(backbone=...)`. `export_patchcore_to_onnx.py`
+was generalized from a ResNet50-only `ResNet50PatchCoreExtractor` to a
+parametrized `PatchCoreBackboneExtractor(backbone_name)`, detecting the
+backbone from a new `_meta_backbone` checkpoint tag (falls back to guessing
+from memory-bank width for older checkpoints). Output files are now named
+`patchcore_{backbone}.*`. The Test tab's `AnomalibScoreWorker` auto-detects
+the backbone the same way instead of hardcoding resnet50.
+
+**2. Segmentation settings are recorded and auto-applied, not manually
+synced.** `SegmentThenTrainRunner` now records the exact `SilhouetteParams`/
+`DiffParams`/mode used to build the training images into the checkpoint
+(`_meta_seg_*`), which the export script carries into `meta.json`'s new
+`"segmentation"` object. `PatchCoreDetector.cs` parses this into
+`SegmentationSettings`; `MainWindow.xaml.cs` applies it automatically, every
+run, before segmentation executes — overriding whatever's in the UI/
+`config.json` — with a clear error if the operator has a genuinely
+incompatible mode selected (e.g. model needs Reference-Diff, UI has
+Silhouette). This is the structural fix for the exact class of bug the round
+above was: WPF's segmentation settings can no longer silently drift from
+what a given model was actually trained with.
+
+**3. The antialiasing bug — the actual remaining cause of "still gives BAD
+for everything."** After (1) and (2) were built and a real ResNet18 model
+retrained through the new path, WPF still read BAD across the whole test
+set, while a direct Python replication with the identical checkpoint and the
+identical recorded settings read GOOD across the whole set (scores tightly
+clustered 3.64–4.03, all correctly under the 4.03 threshold). Since (2) ruled
+out a settings mismatch and the ONNX-vs-PyTorch weight fidelity had already
+been verified bit-exact for this backbone too, the remaining candidate was
+the one pixel-level step no prior round had checked: **the resize to
+256×256**. `PatchCoreDetector.PreprocessSingleResize` used
+`Cv2.Resize(..., InterpolationFlags.Linear)`; Anomalib's real pre-processor
+(`Patchcore.configure_pre_processor`) uses `torchvision.transforms.v2.Resize`
+with **`antialias=True`**. Because `ImageLoader.LoadFull` feeds PatchCore a
+native-resolution photo (often ~4000px), this resize is commonly a ~16×
+downscale — large enough that antialiasing isn't a rounding nicety, it
+measurably changes what the network sees. Measured directly on one test
+image:
+
+| Resize method | raw score | verdict |
+|---|---|---|
+| torchvision, `antialias=True` (real pipeline) | 3.89 | GOOD |
+| torchvision, `antialias=False` | 8.98 | BAD |
+| `Cv2.Resize` + `InterpolationFlags.Linear` (what the code had) | 9.05 | BAD |
+| `Cv2.Resize` + `InterpolationFlags.Area` | 4.52 | BAD |
+
+`INTER_AREA` gets meaningfully closer but isn't the same filter torchvision
+uses and wasn't accurate enough given how narrow this model's calibrated
+GOOD band is (3.64–4.03, ~0.4 units wide) — every image was still pushed
+over the threshold. **Fix:** added `AntialiasedResize` to `PatchCoreDetector.cs`
+— a hand-rolled separable triangle-filter resize (support width scaled by
+the downsample ratio, the same algorithm Pillow/torchvision's antialiased
+bilinear implements), replacing the `Cv2.Resize` call in
+`PreprocessSingleResize`. Validated the same way as the round-4 ONNX
+weight fix: reimplemented the identical algorithm in Python/numpy first and
+compared its score against the real torchvision output before porting to C#
+(3.79 vs the real 3.89 — within ~3%), then ran it across the full test set:
+14 of 15 images now read GOOD, matching the real pipeline; the one holdout
+(`IMG20260825140047.jpg`) had already scored exactly at the threshold
+(`4.0300` vs `4.0300`) in the ground-truth run, so a ~1% approximation gap
+flipping that single already-on-the-boundary case is expected, not a defect
+in the resize algorithm.
+
+**Standing caution, not yet acted on:** this model's calibrated GOOD band is
+inherently narrow (~0.4 units, driven by `Train/trainer.py`'s validation-set-
+is-all-normal `image_max = 2×image_min` widening heuristic). Even with the
+resize now accurate to ~2-3%, a band this thin will keep being fragile to
+small real-world numerical variation (camera noise, JPEG artifacts, lighting)
+that has nothing to do with a code bug. If borderline flips keep recurring
+after this fix, the next lever is retraining with a more deliberately chosen
+margin or a larger/more diverse calibration set — not another round of
+preprocessing archaeology.
+
 ---
 
 ## 2. Current pipeline shape (both detection methods)

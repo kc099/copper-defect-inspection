@@ -249,7 +249,7 @@ namespace copperInspection
         //  Patchcore loading class
         // ══════════════════════════════════════════════════════
 
-        
+
 
         private PatchCoreDetector GetOrLoadDetector(string backboneName)
         {
@@ -278,25 +278,17 @@ namespace copperInspection
             string binPath = Path.Combine(AppContext.BaseDirectory, "Assets", binFile);
             string metaPath = Path.Combine(AppContext.BaseDirectory, "Assets", metaFile);
 
-            if (!File.Exists(onnxPath) || !File.Exists(binPath))
+            if (!File.Exists(onnxPath) || !File.Exists(binPath) || !File.Exists(metaPath))
             {
                 throw new FileNotFoundException($"PatchCore asset files missing in Assets directory for {backboneName}. " +
-                                                $"Ensure {onnxFile} and {binFile} exist.");
+                                                $"Ensure {onnxFile}, {binFile}, and {metaFile} exist.");
             }
 
-            // Read threshold from metadata JSON if available, otherwise default to 0.5f
-            float threshold = 0.5f;
-            if (File.Exists(metaPath))
-            {
-                string json = File.ReadAllText(metaPath);
-                using var doc = System.Text.Json.JsonDocument.Parse(json);
-                if (doc.RootElement.TryGetProperty("threshold", out var elem))
-                {
-                    threshold = (float)elem.GetDouble();
-                }
-            }
-
-            _detector = new PatchCoreDetector(onnxPath, binPath, threshold);
+            // Threshold, image_min/image_max, and is_grayscale are all read
+            // from metaFile inside the constructor (PatchCoreDetector.LoadMetadata)
+            // - single source of truth, so there's no separate parsing here to
+            // drift out of sync with it.
+            _detector = new PatchCoreDetector(onnxPath, binPath, metaPath);
             _loadedBackbone = backboneName;
             return _detector;
         }
@@ -406,19 +398,94 @@ namespace copperInspection
             string verdict = "N/A";
             double defectPct = 0.0;
             string? err = null;
+            string? appliedSegNote = null;
 
             await Task.Run(() =>
             {
                 try
                 {
-                    Mat target = ImageLoader.LoadResized(targetPath);
+                    // PatchCore loads at native resolution, not the 800px
+                    // display size: BackgroundSubtraction's morphology kernels
+                    // are a fixed pixel size (e.g. 5x5), so they erode/smooth
+                    // proportionally more on a downscaled image - segmenting
+                    // it differently than the Python reference tooling, which
+                    // never resizes before segmenting, and than however the
+                    // model's own training/calibration images were prepared.
+                    // Confirmed empirically: same image+settings scored GOOD
+                    // at native resolution, BAD at 800px-wide. See
+                    // docs/WORK_LOG.md. Color Difference keeps the 800px path -
+                    // this fix is scoped to what was actually shown to need it.
+                    bool isPatchCore = detectionMethod.StartsWith("PatchCore");
+
+                    // For PatchCore, load the detector FIRST (before running
+                    // background subtraction) so its recorded segmentation
+                    // settings - the exact settings its training images were
+                    // built with - can override whatever the UI/config
+                    // snapshotted above. This is what stops WPF's segmentation
+                    // from silently drifting away from what the model was
+                    // actually trained on, which has produced wrong verdicts
+                    // more than once (docs/PATCHCORE_R50_FLOW_COMPARISON.md).
+                    // Applied every run, not just once, so a stray UI tweak
+                    // between runs can't reintroduce the drift.
+                    bool skipSegmentation = false;
+                    if (isPatchCore)
+                    {
+                        var detectorForSettings = GetOrLoadDetector(detectionMethod);
+                        var rec = detectorForSettings.SegmentationSettings;
+                        if (rec != null)
+                        {
+                            if (rec.Mode == "Silhouette")
+                            {
+                                if (useDiff)
+                                    throw new InvalidOperationException(
+                                        "This model was trained with Silhouette segmentation, but " +
+                                        "Reference-Image Diff is selected. Switch to Silhouette mode and retry.");
+                                silhouetteParams.Flatten = rec.Flatten ?? silhouetteParams.Flatten;
+                                silhouetteParams.AutoThreshold = rec.AutoThreshold ?? silhouetteParams.AutoThreshold;
+                                silhouetteParams.Threshold = rec.Threshold ?? silhouetteParams.Threshold;
+                                silhouetteParams.Morph = rec.Morph ?? silhouetteParams.Morph;
+                                silhouetteParams.Keep = rec.Keep ?? silhouetteParams.Keep;
+                                silhouetteParams.Fill = rec.Fill ?? silhouetteParams.Fill;
+                                appliedSegNote = "using the model's recorded training settings";
+                            }
+                            else if (rec.Mode == "ReferenceDiff")
+                            {
+                                if (!useDiff || bgPath == null)
+                                    throw new InvalidOperationException(
+                                        "This model was trained with Reference-Image Diff segmentation. " +
+                                        "Switch to that mode, pick a background image, and retry.");
+                                diffParams.Blur = rec.DiffBlur ?? diffParams.Blur;
+                                diffParams.Threshold = rec.DiffThreshold ?? diffParams.Threshold;
+                                diffParams.Morph = rec.DiffMorph ?? diffParams.Morph;
+                                diffParams.Keep = rec.DiffKeep ?? diffParams.Keep;
+                                diffParams.MatchExposure = rec.DiffMatchExposure ?? diffParams.MatchExposure;
+                                appliedSegNote = "using the model's recorded training settings";
+                            }
+                            else if (rec.Mode == "None")
+                            {
+                                skipSegmentation = true;
+                                appliedSegNote = "segmentation skipped - model was trained on raw, unsegmented images";
+                            }
+                        }
+                    }
+
+                    Mat target = isPatchCore ? ImageLoader.LoadFull(targetPath) : ImageLoader.LoadResized(targetPath);
                     original = target;
 
                     // 1. Background Subtraction Stage
                     BackgroundResult bgResult;
-                    if (useDiff)
+                    if (skipSegmentation)
                     {
-                        using Mat bg = ImageLoader.LoadResized(bgPath!);
+                        bgResult = new BackgroundResult
+                        {
+                            Result = target.Clone(),
+                            Mask = new Mat(target.Size(), MatType.CV_8UC1, Scalar.All(255)),
+                            Note = "No segmentation (model trained on raw images)",
+                        };
+                    }
+                    else if (useDiff)
+                    {
+                        using Mat bg = isPatchCore ? ImageLoader.LoadFull(bgPath!) : ImageLoader.LoadResized(bgPath!);
                         bgResult = BackgroundSubtraction.SubtractBackground(bg, target, diffParams);
                     }
                     else
@@ -475,6 +542,20 @@ namespace copperInspection
             }
             if (original == null || bgSubtracted == null || heatmap == null || overlay == null) return;
 
+            // Reflect whatever segmentation settings actually ran back onto
+            // the controls, so the UI never shows something different from
+            // what was fed to the model - silhouetteParams/diffParams may
+            // have been overridden above by the PatchCore model's recorded
+            // training settings.
+            if (appliedSegNote != null)
+            {
+                FlattenLightingCheck.IsChecked = silhouetteParams.Flatten;
+                AutoThresholdCheck.IsChecked = silhouetteParams.AutoThreshold;
+                SilhouetteThresholdSlider.Value = silhouetteParams.Threshold;
+                DiffBlurSlider.Value = diffParams.Blur;
+                DiffThresholdSlider.Value = diffParams.Threshold;
+            }
+
             Cam1TargetImage.Source = MatToBmp(original);
             Cam1ResultImage.Source = MatToBmp(bgSubtracted);
             Cam2TargetImage.Source = MatToBmp(heatmap);
@@ -525,7 +606,8 @@ namespace copperInspection
             }
 
             string modeNote = useDiff ? "reference-image diff" : "silhouette";
-            StatusLabel.Text = $"Done — {verdict} · {modeNote}{(string.IsNullOrEmpty(bgNote) ? "" : " · " + bgNote)}.";
+            string segAppliedNote = appliedSegNote != null ? $" · {appliedSegNote}" : "";
+            StatusLabel.Text = $"Done — {verdict} · {modeNote}{(string.IsNullOrEmpty(bgNote) ? "" : " · " + bgNote)}{segAppliedNote}.";
         }
 
         // ══════════════════════════════════════════════════════

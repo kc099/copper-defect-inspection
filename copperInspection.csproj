@@ -10,9 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Remove="Assets\patchcore_resnet18.onnx" />
     <None Remove="Assets\patchcore_resnet18.onnx.data" />
-    <None Remove="Assets\patchcore_resnet18_bank.bin" />
   </ItemGroup>
 
   <ItemGroup>
@@ -24,13 +22,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="Assets\patchcore_resnet18.onnx">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Content>
     <Content Include="Assets\patchcore_resnet18.onnx.data">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Content>
-    <Content Include="Assets\patchcore_resnet18_bank.bin">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
@@ -38,7 +30,19 @@
   <ItemGroup>
     <!-- Hand-editable pipeline config - lives next to the .exe, not %AppData%,
          and PreserveNewest so an operator's edits survive a rebuild. -->
+    <None Update="Assets\patchcore_resnet18.onnx">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Assets\patchcore_resnet18_bank.bin">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Assets\patchcore_resnet18_meta.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
     <None Update="Assets\patchcore_resnet50.onnx">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Assets\patchcore_resnet50.onnx.data">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
     <None Update="Assets\patchcore_resnet50_bank.bin">

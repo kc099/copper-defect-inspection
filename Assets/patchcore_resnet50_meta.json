@@ -1,8 +1,9 @@
 {
   "backbone": "resnet50",
   "feature_dim": 2560,
-  "num_patches": 2048,
-  "image_min": 6.806609153747559,
-  "image_max": 13.613218307495117,
-  "threshold": 0.5
+  "num_patches": 6144,
+  "threshold": 6.698276996612549,
+  "image_min": 6.192826747894287,
+  "image_max": 12.385653495788574,
+  "is_grayscale": true
 }
