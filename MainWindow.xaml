@@ -235,6 +235,41 @@
                                    Foreground="#484870" FontSize="10"
                                    TextWrapping="Wrap" Margin="0,0,0,14"/>
 
+                        <!-- ══ CAMERA (Baumer / NeoAPI) ══ -->
+                        <TextBlock Text="📷  Camera" Style="{StaticResource SectionHdr}"/>
+                        <ComboBox x:Name="CameraCombo" Style="{StaticResource DarkCombo}" Margin="0,0,0,6"
+                                  SelectionChanged="CameraCombo_SelectionChanged"/>
+                        <TextBlock x:Name="CameraStatusLabel" Text="Looking for a camera…"
+                                   Foreground="#484870" FontSize="10"
+                                   TextWrapping="Wrap" Margin="0,0,0,8"/>
+                        <Grid Margin="0,0,0,14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="6"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Button x:Name="StartStreamBtn" Grid.Column="0" Content="▶  Start Stream"
+                                    Style="{StaticResource PrimaryBtn}" Click="StartStreamBtn_Click"
+                                    FontSize="10" Padding="4,6" IsEnabled="False"/>
+                            <Button x:Name="StopStreamBtn" Grid.Column="2" Content="■  Stop Stream"
+                                    Style="{StaticResource PrimaryBtn}" Click="StopStreamBtn_Click"
+                                    FontSize="10" Padding="4,6" IsEnabled="False"/>
+                        </Grid>
+
+                        <!-- CameraBridge.exe's own diagnostic log, live - see
+                             Camera/BaumerCamera.cs's LogLineReceived. -->
+                        <TextBlock Text="Camera Bridge Log" Style="{StaticResource FieldLbl}"/>
+                        <Border Background="#0E0E1C" BorderBrush="#383860" BorderThickness="1"
+                                CornerRadius="3" Margin="0,0,0,14">
+                            <TextBox x:Name="CameraLogBox" Height="90"
+                                     Background="Transparent" Foreground="#7DE8A0"
+                                     FontFamily="Consolas" FontSize="9"
+                                     BorderThickness="0" Padding="5"
+                                     IsReadOnly="True" TextWrapping="Wrap"
+                                     VerticalScrollBarVisibility="Auto"
+                                     Text="(camera bridge not started yet)"/>
+                        </Border>
+
                         <!-- Image selection -->
                         <TextBlock Text="🖼  Image Selection" Style="{StaticResource SectionHdr}"/>
                         <TextBlock Text="Image to Inspect" Style="{StaticResource FieldLbl}"/>
@@ -386,6 +421,13 @@
                                 Click="RunBtn_Click"
                                 HorizontalAlignment="Stretch"
                                 FontSize="13" Padding="12,9" Margin="0,0,0,10"/>
+
+                        <Button x:Name="CaptureBtn" Content="📸  Capture &amp; Inspect"
+                                Style="{StaticResource PrimaryBtn}"
+                                Click="CaptureBtn_Click"
+                                HorizontalAlignment="Stretch"
+                                FontSize="12" Padding="10,7" Margin="0,0,0,10"
+                                IsEnabled="False"/>
 
                         <ProgressBar x:Name="ProgressBar" Height="4"
                                      IsIndeterminate="False"

@@ -67,6 +67,41 @@ ONNX-Runtime-based port of the PatchCore anomaly-detection model (see
 files must be present locally / copied from shared storage** on any machine
 that runs PatchCore-R18 — a fresh `git clone` will not have them.
 
+### Fix — "0xC0000005 Access Violation on launch, PatchCore-R18 selected" (Aug 26, 2026)
+
+Reported symptom: right after the commit above wired up PatchCore-R18,
+selecting it and clicking Run crashed the whole process — not a .NET
+exception, a hard native crash (`The program '[23280] copperInspection.exe'
+has exited with code 3221225477 (0xc0000005) Access violation`) — and only
+in `bin\x64\Debug\net10.0-windows\` builds; the plain (non-`x64`) `Debug`
+build folder didn't reproduce it.
+
+**Root cause.** The project also referenced the Baumer `neoAPI` camera SDK
+NuGet package. `neoAPI` bundles its own native runtime DLLs
+(`msvcp140.dll`, `vcruntime140.dll`, `concrt140.dll`, and others) and flattens
+them straight into the app's output root — the same folder
+`Microsoft.ML.OnnxRuntime` drops `onnxruntime.dll` into. The `x64`-specific
+build copies a different set of these than the default build, which is why
+only that output folder crashed. With two vendors' copies of the MSVC
+runtime DLLs both loaded into one process, the native ONNX Runtime session
+init corrupts memory — `onnxruntime.dll` itself was verified byte-identical/
+uncorrupted, so this was a DLL *search-order/version conflict*, not a bad
+model file or a bad ONNX Runtime install.
+
+Confirmed nothing in the actual source used `neoAPI` — a repo-wide grep for
+it only turned up auto-generated `obj/` build artifacts, no real call sites.
+
+**Fix**: removed the `neoAPI` `PackageReference` from `copperInspection.csproj`
+entirely. Verified via a clean rebuild (both plain `dotnet build` and
+`dotnet build -p:Platform=x64`) that every Baumer DLL disappeared from both
+output folders while `onnxruntime.dll` remained present and intact. Crash
+stopped reproducing on either build configuration.
+
+*(Camera capture via `neoAPI` isn't implemented anywhere yet, so nothing
+was lost by removing it. If live camera capture is added later, keep its
+native DLLs in a separate subfolder rather than the app root, or the same
+conflict will come back.)*
+
 ### Fix — "PatchCore-R18 always says BAD, even on training images" (Aug 25, 2026 — today)
 
 Reported symptom: every image scored BAD in PatchCore-R18 mode — including
@@ -351,6 +386,77 @@ training, or the model has no basis for recognizing a differently-segmented
 good part as normal — the same underlying lesson as every round before this
 one, just landing on a setting instead of a code path.
 
+### Note — ONNX export's requested opset 14 isn't actually honored (Aug 26, 2026)
+
+Separate from the calibration saga above: while verifying `export_output/`'s
+files loaded and ran correctly (round 4's weight-loading fix), found that
+`export_patchcore_to_onnx.py`'s `torch.onnx.export(..., opset_version=14,
+...)` call does not produce an opset-14 file on this machine's PyTorch
+(2.12.1). PyTorch 2.12 defaults to its newer "dynamo" exporter regardless of
+the requested `opset_version`, which instead wrote IR version 10 / opset 18.
+A post-hoc downgrade attempt via the ONNX C API failed outright
+(`No Adapter From Version $16 for Identity`) and was silently swallowed —
+non-fatal, but the file stayed at opset 18, not 14.
+
+**Practical impact: none found.** The original motivation for opset 14 was
+a "Protobuf parsing failed" error in the .NET consumer — but the *actual*
+fix for that was the export producing a much smaller graph (166MB → ~90MB
+range) once the graph was built correctly, not the opset number specifically.
+Verified directly rather than assumed: loaded the opset-18 file with the
+real `Microsoft.ML.OnnxRuntime` 1.29.0 (the exact package version this app
+uses) via the [PortTest](../../PortTest/) harness — session construction,
+inference, and shapes all came back correct, no load error. Leaving this
+here as a known discrepancy between the script's stated setting and its
+actual output, in case a future .NET Runtime version is pickier about opset
+than 1.29.0 is.
+
+### Perf check — PatchCore batch timing, 2 and 4 images, both backbones (Aug 27, 2026)
+
+Asked: how long does PatchCore actually take end-to-end (background
+subtraction + inference) when running 2, then 4, real images back to back —
+without touching the real app or its `MainWindow` to find out.
+
+**Method**: extended the existing [PortTest](../../PortTest/) console
+project — it only `<Compile Include>`-links the real
+[BackgroundSubtraction.cs](../BackgroundSubtraction.cs),
+[DefectDetector.cs](../DefectDetector.cs), and
+[Detection/PatchCoreDetector.cs](../Detection/PatchCoreDetector.cs) files
+(not copies) and reads the real, already-deployed `Assets/*.onnx|*.bin|
+*.json` — so this exercises the actual production code and actual deployed
+model files read-only, with zero changes to the shipped app. Timed run
+against the first 4 images in `copper/good/`, replicating
+`MainWindow.xaml.cs`'s real PatchCore path exactly: `ImageLoader.LoadFull` →
+apply the model's recorded segmentation settings (falls back to
+`config.json` defaults when a backbone has none, same as the real app) →
+`SegmentSilhouette` → `detector.Inspect(...)`. Detector construction (ONNX
+session + memory-bank load) is timed once, separately, since the real app's
+`GetOrLoadDetector` caches it per backbone rather than reloading per image.
+
+**Results:**
+
+| Backbone | One-time load | 2 images | 4 images | Per-image avg |
+|---|---|---|---|---|
+| PatchCore-R18 (6,144×640 bank) | 750 ms | 2,241 ms | 2,983 ms | ~736 ms (first image ~1.8s cold, then ~330–390 ms) |
+| PatchCore-R50 (6,144×2,560 bank) | 581 ms | 2,247 ms | 4,394 ms | ~1,092 ms, fairly flat across all 4 |
+
+R18's first image is markedly slower than the rest (1,843 ms vs. ~330–390 ms)
+— consistent with JIT/first-call warmup in the ONNX Runtime session rather
+than a per-image cost; from the second image on it settles to roughly
+2.5–3× faster per image than R50, matching the bank being 4× smaller
+(640 vs. 2,560 channels) and the "Distance Search" step dominating both
+(R18: ~75–650 ms; R50: consistently ~700–790 ms) per the detector's own
+built-in step timing. Bottom line for planning: two images cost well under
+3 seconds total on either backbone including model load; four images stay
+under 5 seconds total; scaling looks roughly linear in image count once the
+one-time load and first-call warmup are accounted for separately.
+
+*(Aside, not investigated further here since it wasn't the ask: all 4 test
+images scored BAD on both backbones in this run. That's the same
+segmentation/training-mismatch class of issue as Round 5 above, not a new
+bug — this run used `copper/good/`'s images with each backbone's own
+recorded/default segmentation settings, not necessarily the exact match this
+particular memory bank was calibrated against.)*
+
 ### Backbone selector, recorded-settings auto-apply, and the antialiasing bug (Aug 27, 2026)
 
 Three changes, building directly on the round above's lesson ("inference
@@ -619,3 +725,83 @@ flowchart TD
   the old manual-ROI-cropper architecture (`RoiCropper`, `RedRoiExtractor`,
   `DefectDetector.Detect()`) which no longer exists in the codebase — it has
   been refreshed alongside this file to match current `HEAD`.
+
+### neoAPI (Baumer camera) + ONNX Runtime confirmed incompatible in one process (Aug 27, 2026)
+
+Built a full live-camera feature (`Camera/BaumerCamera.cs` wrapping Baumer's
+`neoAPI` NuGet package: device discovery/pick-by-serial, a background
+acquisition thread, a live-view `DispatcherTimer` painting slot 1, Start/Stop
+Stream buttons, and a Capture button reusing the same pipeline as Run
+Detection via a new shared `RunDetectionPipelineAsync`). Confirmed it
+reproduces the exact `0xC0000005` crash already noted earlier in this file
+("0xC0000005 Access Violation on launch, PatchCore-R18 selected") — same
+package combination, same trigger (constructing `PatchCoreDetector`, i.e.
+the first `Microsoft.ML.OnnxRuntime.SessionOptions()` in the process).
+
+**What's actually new this time — a real root cause, not just "remove the
+package again":**
+
+1. First mitigation tried: exclude neoAPI's bundled `vcruntime140.dll` /
+   `msvcp140.dll` / `concrt140.dll` / etc. from the build output (an MSBuild
+   `Target` deleting them post-build), reasoning that two copies of the MSVC
+   runtime in one process was the collision. Rebuilt `bin\x64\Debug\` (the
+   exact folder the original report was specific to), confirmed structurally
+   that `onnxruntime.dll` and the real neoAPI DLLs now sit together without
+   those CRT copies, and smoke-tested that the app launches and survives
+   past camera discovery. **This did not fix it** — user reproduced the same
+   crash immediately on Run Detection with PatchCore selected, no camera
+   attached.
+2. Reproduced the crash in complete isolation to rule out anything specific
+   to the new WPF code: a minimal console harness (temporarily repurposing
+   `PortTest/`, restored afterward) that only calls `NeoAPI.CamInfoList.Get()`
+   and then constructs a `PatchCoreDetector` — no WPF, no MongoDB, no camera
+   hardware, no `BaumerCamera`/`MainWindow` code at all. Crashed identically.
+   This time .NET's own crash handler produced a managed stack trace instead
+   of a bare exit code:
+   ```
+   0xC0000005
+      at Microsoft.ML.OnnxRuntime.CompileApi.NativeMethods..ctor(DOrtGetCompileApi)
+      at Microsoft.ML.OnnxRuntime.NativeMethods..cctor()
+      at Microsoft.ML.OnnxRuntime.SessionOptions..ctor()
+      at copperInspection.Detection.PatchCoreDetector..ctor(...)
+   ```
+   The crash is inside ONNX Runtime's managed wrapper reading the native
+   function-pointer table out of `onnxruntime.dll` — and it happens *after*
+   `CamInfoList.Get()` had already run successfully ("NeoAPI OK — 0 camera(s)
+   found"). One native SDK's init succeeding and corrupting the *next* SDK's
+   library resolution is the signature of a process-wide side effect (most
+   likely neoAPI's device-discovery code calling something like
+   `SetDllDirectory` to find its own GenTL producer/driver DLLs, which can
+   silently change how the next native library in the process gets resolved)
+   — not a duplicate-file problem, which is why excluding specific DLLs
+   didn't help.
+3. Wanted to narrow it further (e.g. confirm reordering — forcing ONNX
+   Runtime to initialize *before* neoAPI ever touches the DLL search path —
+   avoids it) but a Windows Application Control policy on the dev machine
+   started blocking the freshly-rebuilt test binary from running at all
+   partway through, so further iteration on that machine wasn't safe/
+   possible. Not pursued further this session.
+
+**Decision: reverted, again.** Removed the `neoAPI` `PackageReference` from
+`copperInspection.csproj` and gutted `Camera/BaumerCamera.cs` down to a stub
+with the same public surface (`ListCameras()` always returns empty,
+`Connect()` throws `NotSupportedException`, everything else is a no-op) so
+`MainWindow.xaml.cs`'s camera wiring still compiles and the Camera UI section
+just stays permanently inert, instead of reverting all the UI/plumbing work.
+Rebuilt clean — no neoAPI/CRT DLLs in `bin/`, app launches fine, PatchCore is
+back to working exactly as before this feature was started.
+
+**What's still real and reusable once camera support comes back:** the XAML
+Camera section (serial picker, Start/Stop buttons, Capture button under Run
+Detection), the live-view `DispatcherTimer` design, and — independent of
+camera hardware entirely — the `RunDetectionPipelineAsync` refactor that
+Run Detection and Capture both call through, so file-based and live-frame
+runs can never drift into two different pipelines.
+
+**What actually fixing this needs:** running the camera in a separate
+process from PatchCore/ONNX Runtime (e.g. a small helper `.exe` that only
+references `neoAPI`, talking to the main app over a named pipe or shared
+memory for frames + control commands), so the two SDKs' native dependencies
+never share a process address space or DLL search path at all. That's a
+real architectural addition, not a config tweak — deliberately not started
+without discussing scope first.

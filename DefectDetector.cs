@@ -44,5 +44,20 @@ namespace copperInspection
             img.Dispose();
             return resized;
         }
+
+        /// <summary>Same downscale as LoadResized, but for a Mat that's already
+        /// in memory (e.g. a live camera capture) instead of a file on disk.
+        /// Always returns a new Mat and never disposes src - caller keeps
+        /// owning what it passed in.</summary>
+        public static Mat ResizeToDisplay(Mat src)
+        {
+            if (src.Width <= DisplayWidth) return src.Clone();
+
+            double scale = (double)DisplayWidth / src.Width;
+            int newH = (int)(src.Height * scale);
+            Mat resized = new();
+            Cv2.Resize(src, resized, new Size(DisplayWidth, newH), interpolation: InterpolationFlags.Area);
+            return resized;
+        }
     }
 }

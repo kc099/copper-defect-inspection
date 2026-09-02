@@ -6,4 +6,5 @@
   <Project Path="copperInspection.csproj">
     <Platform Solution="*|x64" Project="x64" />
   </Project>
+  <Project Path="CameraBridge\CameraBridge.csproj" />
 </Solution>

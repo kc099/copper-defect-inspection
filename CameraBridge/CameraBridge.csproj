@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Deliberately its own process, separate from copperInspection.exe -
+         see the comment at the top of Camera/CameraProtocol.cs for why.
+         Never add a Microsoft.ML.OnnxRuntime reference to this project. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="neoAPI" Version="1.6.0" />
+    <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260602" />
+    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260602" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Single source of truth for the wire protocol - see that file's own
+         header comment. -->
+    <Compile Include="..\Camera\CameraProtocol.cs" Link="CameraProtocol.cs" />
+  </ItemGroup>
+
+</Project>

@@ -9,6 +9,8 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
+using copperInspection.Camera;
 using copperInspection.Detection;
 using System.Numerics.Tensors;
 
@@ -26,6 +28,13 @@ namespace copperInspection
         private ReferenceColor? _referenceColor;
         private PatchCoreDetector _detector;
         private string? _loadedBackbone = null;
+        private bool _busy = false;
+
+        // Baumer live camera feed - see Camera/BaumerCamera.cs.
+        private readonly BaumerCamera _camera = new();
+        private List<CameraDeviceInfo> _cameraDevices = new();
+        private DispatcherTimer? _liveViewTimer;
+        private bool _liveViewActive = false;
 
 
         public MainWindow()
@@ -35,6 +44,28 @@ namespace copperInspection
             _config = ConfigStore.Load();
             LoadReferenceColor();
             ApplyConfig(_config);
+
+            // Show CameraBridge.exe's own diagnostics live instead of making
+            // anyone go find CameraBridge.log by hand.
+            _camera.LogLineReceived += OnCameraLogLine;
+
+            // Discovery/connect can take a moment (GenICam device enumeration) -
+            // run it off the UI thread so a missing/slow camera never delays
+            // the window opening.
+            _ = InitCameraAsync();
+        }
+
+        private void OnCameraLogLine(string line)
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (CameraLogBox.Text == "(camera bridge not started yet)")
+                    CameraLogBox.Text = "";
+                CameraLogBox.AppendText(line + Environment.NewLine);
+                if (CameraLogBox.Text.Length > 20000)
+                    CameraLogBox.Text = CameraLogBox.Text[^15000..];
+                CameraLogBox.ScrollToEnd();
+            });
         }
 
         // ══════════════════════════════════════════════════════
@@ -133,6 +164,8 @@ namespace copperInspection
         {
             _config = CollectConfig();
             ConfigStore.Save(_config);
+            SetLiveViewActive(false);
+            _camera.Dispose();
             base.OnClosing(e);
         }
 
@@ -198,6 +231,10 @@ namespace copperInspection
 
         private void TargetCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
         {
+            // A file was picked for testing - stop the live feed from
+            // immediately overwriting it in slot 1. Start Stream resumes it.
+            SetLiveViewActive(false);
+
             // Show the picked image immediately - don't make the operator click
             // Run Detection just to confirm what they selected.
             ClearResults();
@@ -245,6 +282,135 @@ namespace copperInspection
             if (SilhouetteThresholdSlider != null)
                 SilhouetteThresholdSlider.IsEnabled = AutoThresholdCheck.IsChecked != true;
         }
+
+        // ══════════════════════════════════════════════════════
+        //  CAMERA (Baumer / NeoAPI live feed)
+        // ══════════════════════════════════════════════════════
+        private async Task InitCameraAsync()
+        {
+            var devices = await Task.Run(() =>
+            {
+                // Launches CameraBridge.exe (separate process - see
+                // Camera/CameraProtocol.cs for why) and lists cameras
+                // through it. Returns empty if the bridge exe isn't present
+                // or fails to start - same as "no camera detected".
+                if (!_camera.EnsureStarted()) return new List<CameraDeviceInfo>();
+                return _camera.ListCameras();
+            });
+            _cameraDevices = devices;
+            CameraCombo.ItemsSource = null;
+            CameraCombo.ItemsSource = devices;
+
+            if (devices.Count == 0)
+            {
+                CameraStatusLabel.Text = "No camera detected";
+                return;
+            }
+
+            // Selecting index 0 fires CameraCombo_SelectionChanged, which does
+            // the actual Connect() + StartStreaming() - this is also the same
+            // code path used when an operator later picks a different camera
+            // from the dropdown, so there is only one place that ever connects.
+            CameraCombo.SelectedIndex = 0;
+        }
+
+        private async void CameraCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        {
+            if (CameraCombo.SelectedIndex < 0 || CameraCombo.SelectedIndex >= _cameraDevices.Count) return;
+
+            SetLiveViewActive(false);
+            var device = _cameraDevices[CameraCombo.SelectedIndex];
+            CameraStatusLabel.Text = $"Connecting to {device}…";
+            CameraCombo.IsEnabled = false;
+
+            string? error = null;
+            await Task.Run(() =>
+            {
+                try { _camera.Connect(device); }
+                catch (Exception ex) { error = ex.Message; }
+            });
+
+            CameraCombo.IsEnabled = !_busy;
+            if (error != null)
+            {
+                CameraStatusLabel.Text = $"Connect failed: {error}";
+                UpdateCameraButtonStates();
+                return;
+            }
+
+            CameraStatusLabel.Text = $"Connected — streaming ({device})";
+            UpdateCameraButtonStates();
+            SetLiveViewActive(true);
+        }
+
+        private void StartStreamBtn_Click(object sender, RoutedEventArgs e)
+        {
+            if (!_camera.IsConnected)
+            {
+                StatusLabel.Text = "No camera connected.";
+                return;
+            }
+            _camera.StartStreaming();
+            UpdateCameraButtonStates();
+            SetLiveViewActive(true);
+            StatusLabel.Text = "Live stream started.";
+        }
+
+        private void StopStreamBtn_Click(object sender, RoutedEventArgs e)
+        {
+            // Testing with an uploaded file shouldn't fight the live feed for
+            // slot 1 - this is the manual escape hatch for that, on top of the
+            // automatic pause when a file is picked (TargetCombo_SelectionChanged).
+            SetLiveViewActive(false);
+            _camera.StopStreaming();
+            UpdateCameraButtonStates();
+            StatusLabel.Text = "Live stream stopped.";
+        }
+
+        /// <summary>Starts/stops the DispatcherTimer that paints slot 1 from the
+        /// camera's latest frame. Decoupled from the camera's own frame rate -
+        /// polls at a fixed ~15 fps so a fast camera can't flood the UI thread's
+        /// dispatcher queue, and does nothing to the acquisition thread itself
+        /// (that keeps running independently either way).</summary>
+        private void SetLiveViewActive(bool active)
+        {
+            _liveViewActive = active && _camera.IsConnected && _camera.IsStreaming;
+            if (_liveViewActive)
+            {
+                if (_liveViewTimer == null)
+                {
+                    _liveViewTimer = new DispatcherTimer(DispatcherPriority.Render)
+                    {
+                        Interval = TimeSpan.FromMilliseconds(66),
+                    };
+                    _liveViewTimer.Tick += LiveViewTimer_Tick;
+                }
+                _liveViewTimer.Start();
+            }
+            else
+            {
+                _liveViewTimer?.Stop();
+            }
+        }
+
+        private void LiveViewTimer_Tick(object? sender, EventArgs e)
+        {
+            using Mat? frame = _camera.GetLatestPreviewFrame();
+            if (frame == null || frame.Empty()) return;
+            Cam1TargetImage.Source = MatToBmp(frame);
+        }
+
+        /// <summary>Single source of truth for the camera-related buttons'
+        /// enabled state - called both from SetBusy and right after any camera
+        /// state change (connect/disconnect/start/stop) so they never go stale.</summary>
+        private void UpdateCameraButtonStates()
+        {
+            CameraCombo.IsEnabled = !_busy;
+            StartStreamBtn.IsEnabled = !_busy && _camera.IsConnected && !_camera.IsStreaming;
+            StopStreamBtn.IsEnabled = !_busy && _camera.IsConnected && _camera.IsStreaming;
+            CaptureBtn.IsEnabled = !_busy && _camera.IsConnected && _camera.IsStreaming;
+        }
+
         // ══════════════════════════════════════════════════════
         //  Patchcore loading class
         // ══════════════════════════════════════════════════════
@@ -361,7 +527,108 @@ namespace copperInspection
             // Snapshot parameters
             string targetPath = _imageFiles[TargetCombo.SelectedIndex];
             string? bgPath = useDiff ? _imageFiles[ReferenceCombo.SelectedIndex] : null;
+            string targetLabel = TargetCombo.SelectedItem as string ?? Path.GetFileName(targetPath);
 
+            var (silhouetteParams, diffParams, colorThreshold, colorMinAreaPct, colorMorph, referenceBgr) = SnapshotParams();
+
+            _config = CollectConfig();
+            ConfigStore.Save(_config);
+
+            // PatchCore loads at native resolution, not the 800px display
+            // size: BackgroundSubtraction's morphology kernels are a fixed
+            // pixel size (e.g. 5x5), so they erode/smooth proportionally more
+            // on a downscaled image - segmenting it differently than the
+            // Python reference tooling, which never resizes before
+            // segmenting, and than however the model's own training/
+            // calibration images were prepared. Confirmed empirically: same
+            // image+settings scored GOOD at native resolution, BAD at
+            // 800px-wide. See docs/WORK_LOG.md. Color Difference keeps the
+            // 800px path - this fix is scoped to what was actually shown to
+            // need it.
+            await RunDetectionPipelineAsync(
+                isPatchCore => isPatchCore ? ImageLoader.LoadFull(targetPath) : ImageLoader.LoadResized(targetPath),
+                targetLabel, useDiff, bgPath, silhouetteParams, diffParams, detectionMethod,
+                colorThreshold, colorMinAreaPct, colorMorph, referenceBgr);
+        }
+
+        // ══════════════════════════════════════════════════════
+        //  CAPTURE (grab the live frame and run it through the
+        //  currently selected pipeline, same as Run Detection)
+        // ══════════════════════════════════════════════════════
+        private async void CaptureBtn_Click(object sender, RoutedEventArgs e)
+        {
+            if (!_camera.IsConnected || !_camera.IsStreaming)
+            {
+                MessageBox.Show("No live camera stream - connect a camera and start the stream first.",
+                    "Capture", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            // Round trip to CameraBridge.exe for a fresh, lossless frame -
+            // deliberately not GetLatestPreviewFrame(), which is JPEG-
+            // compressed for the live view and shouldn't feed detection.
+            SetBusy(true);
+            StatusLabel.Text = "Capturing frame…";
+            Mat? frame = await Task.Run(() => _camera.CaptureFullFrame());
+            SetBusy(false);
+
+            if (frame == null || frame.Empty())
+            {
+                frame?.Dispose();
+                MessageBox.Show("No frame received yet - wait a moment and try again.",
+                    "Capture", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            bool useDiff = RadioReferenceDiff.IsChecked == true;
+            string? bgPath = null;
+            if (useDiff)
+            {
+                if (ReferenceCombo.SelectedIndex < 0)
+                {
+                    frame.Dispose();
+                    MessageBox.Show("Select a background image for Reference-Image Diff mode.",
+                        "Selection Required", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+                bgPath = _imageFiles[ReferenceCombo.SelectedIndex];
+            }
+
+            string detectionMethod = RadioPatchCoreR50.IsChecked == true ? "PatchCore-R50"
+                                   : RadioPatchCoreR18.IsChecked == true ? "PatchCore-R18"
+                                   : "ColorDiff";
+            if (detectionMethod == "ColorDiff" && _referenceColor == null)
+            {
+                frame.Dispose();
+                MessageBox.Show($"No reference colour loaded (Assets\\{_config.ReferenceColorPath} missing or invalid).",
+                    "Reference Colour Missing", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
+            var (silhouetteParams, diffParams, colorThreshold, colorMinAreaPct, colorMorph, referenceBgr) = SnapshotParams();
+            string label = $"Live Capture {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
+
+            // The captured frame is already native camera resolution -
+            // PatchCore uses it as-is (see the LoadFull comment in
+            // RunBtn_Click); Color Difference still downscales to the 800px
+            // path it was calibrated against, same as the file-based flow.
+            await RunDetectionPipelineAsync(
+                isPatchCore =>
+                {
+                    if (isPatchCore) return frame;
+                    using Mat raw = frame;
+                    return ImageLoader.ResizeToDisplay(raw);
+                },
+                label, useDiff, bgPath, silhouetteParams, diffParams, detectionMethod,
+                colorThreshold, colorMinAreaPct, colorMorph, referenceBgr);
+        }
+
+        /// <summary>Reads the current parameter controls into the value types
+        /// the pipeline needs - shared by both Run Detection and Capture so
+        /// they can never read the UI differently from one another.</summary>
+        private (SilhouetteParams silhouette, DiffParams diff, double colorThreshold,
+            double colorMinAreaPct, int colorMorph, Scalar referenceBgr) SnapshotParams()
+        {
             var silhouetteParams = new SilhouetteParams
             {
                 Flatten = FlattenLightingCheck.IsChecked == true,
@@ -380,14 +647,36 @@ namespace copperInspection
                 MatchExposure = _config.MatchExposure,
                 AllowResize = _config.AllowResize,
             };
-
             double colorThreshold = ColorThresholdSlider.Value;
             double colorMinAreaPct = ColorMinAreaSlider.Value;
             int colorMorph = _config.ColorDiffMorphKernel;
             Scalar referenceBgr = _referenceColor?.Bgr ?? new Scalar(0, 0, 0);
+            return (silhouetteParams, diffParams, colorThreshold, colorMinAreaPct, colorMorph, referenceBgr);
+        }
 
-            _config = CollectConfig();
-            ConfigStore.Save(_config);
+        /// <summary>The actual background-subtraction + detector dispatch +
+        /// verdict/report pipeline, shared by Run Detection (file-based
+        /// target) and Capture (live-frame target). loadTarget is called
+        /// exactly once, inside the background Task, with whether the
+        /// selected detection method is PatchCore - it returns the Mat the
+        /// rest of the pipeline should treat as "the original image", and the
+        /// pipeline takes ownership of (and disposes) whatever it returns.</summary>
+        private async Task RunDetectionPipelineAsync(
+            Func<bool, Mat> loadTarget,
+            string targetLabel,
+            bool useDiff,
+            string? bgPath,
+            SilhouetteParams silhouetteParams,
+            DiffParams diffParams,
+            string detectionMethod,
+            double colorThreshold,
+            double colorMinAreaPct,
+            int colorMorph,
+            Scalar referenceBgr)
+        {
+            // Don't let the live feed repaint slot 1 out from under whatever
+            // this run is about to show there.
+            SetLiveViewActive(false);
 
             SetBusy(true);
             StatusLabel.Text = $"Running pipeline ({detectionMethod})…";
@@ -404,17 +693,6 @@ namespace copperInspection
             {
                 try
                 {
-                    // PatchCore loads at native resolution, not the 800px
-                    // display size: BackgroundSubtraction's morphology kernels
-                    // are a fixed pixel size (e.g. 5x5), so they erode/smooth
-                    // proportionally more on a downscaled image - segmenting
-                    // it differently than the Python reference tooling, which
-                    // never resizes before segmenting, and than however the
-                    // model's own training/calibration images were prepared.
-                    // Confirmed empirically: same image+settings scored GOOD
-                    // at native resolution, BAD at 800px-wide. See
-                    // docs/WORK_LOG.md. Color Difference keeps the 800px path -
-                    // this fix is scoped to what was actually shown to need it.
                     bool isPatchCore = detectionMethod.StartsWith("PatchCore");
 
                     // For PatchCore, load the detector FIRST (before running
@@ -469,7 +747,7 @@ namespace copperInspection
                         }
                     }
 
-                    Mat target = isPatchCore ? ImageLoader.LoadFull(targetPath) : ImageLoader.LoadResized(targetPath);
+                    Mat target = loadTarget(isPatchCore);
                     original = target;
 
                     // 1. Background Subtraction Stage
@@ -572,7 +850,7 @@ namespace copperInspection
                     Method = detectionMethod,
                     Mode = useDiff ? "ReferenceDiff" : "Silhouette",
                     ReferenceImage = useDiff ? (ReferenceCombo.SelectedItem as string ?? string.Empty) : string.Empty,
-                    TargetImage = TargetCombo.SelectedItem as string ?? string.Empty,
+                    TargetImage = targetLabel,
                     ImageData = png,
                     ResultImageBase64 = "data:image/png;base64," + Convert.ToBase64String(png)
                 };
@@ -652,12 +930,14 @@ namespace copperInspection
 
         private void SetBusy(bool busy)
         {
+            _busy = busy;
             RunBtn.IsEnabled = !busy;
             BrowseFolderBtn.IsEnabled = !busy;
             TargetCombo.IsEnabled = !busy;
             ReferenceCombo.IsEnabled = !busy;
             ProgressBar.IsIndeterminate = busy;
             ProgressBar.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+            UpdateCameraButtonStates();
         }
 
         private void ClearResults()

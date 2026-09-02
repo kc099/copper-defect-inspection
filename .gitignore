@@ -25,6 +25,7 @@ obj/
 *.pth
 *.pkl
 Assets/*.bin
+Assets/RGB
 
 # ── OS junk ──────────────────────────────────────────────────────────────
 Thumbs.db

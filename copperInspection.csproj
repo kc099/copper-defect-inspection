@@ -7,6 +7,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <Platforms>AnyCPU;x64</Platforms>
+    <!-- CameraBridge is a separate project nested under this one on disk -
+         without this, the default **/*.cs glob below would compile its
+         Program.cs (which references neoAPI) straight into this assembly,
+         silently undoing the whole point of running the camera in a
+         separate process. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);CameraBridge/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,6 +26,37 @@
     <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260602" />
     <PackageReference Include="OpenCvSharp4.WpfExtensions" Version="4.13.0.20260602" />
   </ItemGroup>
+
+  <!-- Baumer neoAPI is deliberately NOT referenced here, directly or
+       transitively. Confirmed (Aug 27, 2026 - see docs/WORK_LOG.md) that
+       referencing it alongside Microsoft.ML.OnnxRuntime in the same process
+       reproduces a real 0xC0000005 access violation inside ONNX Runtime's
+       native API-table binding (Microsoft.ML.OnnxRuntime.NativeMethods.
+       .cctor), reproduced in total isolation with no WPF/camera/app code
+       involved - a genuine in-process native conflict between the two
+       SDKs, not something an excluded-DLL patch fixed. The camera instead
+       runs in CameraBridge\ - its own separate process, which is the only
+       thing that references neoAPI - and Camera/BaumerCamera.cs talks to
+       it over named pipes.
+
+       Deliberately NOT a <ProjectReference> here: even with
+       ReferenceOutputAssembly="false", MSBuild still propagates a
+       referenced project's CopyToOutputDirectory content (which is exactly
+       how neoAPI's own .targets file marks its native DLLs) into the
+       *referencing* project's output root - verified empirically, it
+       copied neoapi_*.dll/bgapi2_*.dll/vcruntime140.dll etc. straight back
+       in next to onnxruntime.dll, undoing the entire point of this split.
+       Building CameraBridge as a plain Exec + copying its output into its
+       own CameraBridge\ subfolder avoids that MSBuild content-propagation
+       path entirely - there is no "reference" relationship for it to flow
+       through. -->
+  <Target Name="BuildAndCopyCameraBridge" AfterTargets="Build;Publish">
+    <Exec Command="dotnet build &quot;$(MSBuildThisFileDirectory)CameraBridge\CameraBridge.csproj&quot; -c $(Configuration)" />
+    <ItemGroup>
+      <_CameraBridgeFiles Include="$(MSBuildThisFileDirectory)CameraBridge\bin\$(Configuration)\net10.0-windows\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_CameraBridgeFiles)" DestinationFolder="$(OutDir)CameraBridge\%(RecursiveDir)" SkipUnchangedFiles="true" />
+  </Target>
 
   <ItemGroup>
     <Content Include="Assets\patchcore_resnet18.onnx.data">
