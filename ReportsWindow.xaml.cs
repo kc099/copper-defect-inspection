@@ -1,41 +1,32 @@
-using Microsoft.Win32;
+﻿using Microsoft.Win32;
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
+using System.Collections.ObjectModel;
 using System.IO;
-using System.Runtime.CompilerServices;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media.Imaging;
 
 namespace copperInspection
 {
-    public partial class ReportsWindow : Window, INotifyPropertyChanged
+    public partial class ReportsWindow : Window
     {
-        private const int RecentCount = 6;
+        /// <summary>Number of frames in the live gallery. Fixed — never grows.</summary>
+        private const int LiveSlots = 6;
 
-        // Backing collection for the gallery. Using ObservableCollection lets us
-        // prepend live reports without re-querying (the UI updates automatically).
-        private readonly System.Collections.ObjectModel.ObservableCollection<DefectReport> _items = new();
+        /// <summary>
+        /// Live = the six fixed frames, newest first, oldest pushed out.
+        /// Range = every report in the chosen dates, wrapped and scrollable.
+        /// </summary>
+        private enum GalleryMode { Live, Range }
 
-        // ── Grid shape the gallery is laid out with (bound from XAML) ──
-        private int _gridRows = 2;
-        private int _gridColumns = 3;
-        public int GridRows    { get => _gridRows;    set { _gridRows = value;    OnPropertyChanged(); } }
-        public int GridColumns { get => _gridColumns; set { _gridColumns = value; OnPropertyChanged(); } }
+        private GalleryMode _mode = GalleryMode.Live;
 
-        public event PropertyChangedEventHandler? PropertyChanged;
-        private void OnPropertyChanged([CallerMemberName] string? name = null)
-            => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+        /// <summary>How many live results arrived while a date range was on screen.</summary>
+        private int _pendingLive;
 
-        /// <summary>Pick rows/columns so all <paramref name="count"/> cards fit without scrolling.</summary>
-        private void SetGridShape(int count)
-        {
-            if (count <= 0) { GridColumns = 1; GridRows = 1; return; }
-            int cols = count <= 6 ? Math.Min(3, count) : (int)Math.Ceiling(Math.Sqrt(count));
-            GridColumns = cols;
-            GridRows    = (int)Math.Ceiling(count / (double)cols);
-        }
+        private readonly ObservableCollection<DefectReport> _items = new();
 
         public ReportsWindow()
         {
@@ -58,9 +49,10 @@ namespace copperInspection
 
         private async System.Threading.Tasks.Task LoadRecentAsync()
         {
+            ApplyMode(GalleryMode.Live);
             await RunQueryAsync(
-                $"Last {RecentCount} Runs",
-                () => ReportStore.QueryRecentAsync(RecentCount));
+                $"Live — Last {LiveSlots} Runs",
+                () => ReportStore.QueryRecentAsync(LiveSlots));
         }
 
         private async void LoadRange_Click(object sender, RoutedEventArgs e)
@@ -75,6 +67,7 @@ namespace copperInspection
                 return;
             }
 
+            ApplyMode(GalleryMode.Range);
             string header = $"{fromLocal:dd MMM yyyy}  →  {toLocal.AddDays(-1):dd MMM yyyy}";
             await RunQueryAsync(header,
                 () => ReportStore.QueryByDateAsync(fromLocal.ToUniversalTime(), toLocal.ToUniversalTime()));
@@ -92,11 +85,15 @@ namespace copperInspection
             try
             {
                 List<DefectReport> reports = await query();
-                SetGridShape(reports.Count);
                 foreach (DefectReport r in reports) _items.Add(r);
 
-                CountLabel.Text          = $"{reports.Count} report(s) shown.";
-                EmptyLabel.Visibility    = reports.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                // Live mode always shows exactly LiveSlots frames: pad the unfilled ones.
+                if (_mode == GalleryMode.Live)
+                    while (_items.Count < LiveSlots) _items.Add(DefectReport.Placeholder());
+
+                UpdateCountLabel(reports.Count);
+                EmptyLabel.Visibility    = reports.Count == 0 && _mode == GalleryMode.Range
+                                           ? Visibility.Visible : Visibility.Collapsed;
                 DownloadAllBtn.IsEnabled = reports.Count > 0;
             }
             catch (Exception ex)
@@ -111,15 +108,25 @@ namespace copperInspection
         //  LIVE UPDATE  (called by MainWindow after a detection is saved)
         // ══════════════════════════════════════════════════════
         /// <summary>
-        /// Prepend a freshly-detected report to the gallery without re-querying,
-        /// preserving whatever filter/date-range the user is currently viewing.
+        /// Push a freshly-detected report into the six live slots: it takes the first
+        /// frame and the oldest one drops off the end, so the slot count — and the
+        /// grid shape — never change. Ignored while a date range is on screen.
         /// </summary>
         public void AddLiveReport(DefectReport report)
         {
-            _items.Insert(0, report);
-            SetGridShape(_items.Count);
+            if (!Dispatcher.CheckAccess()) { Dispatcher.Invoke(() => AddLiveReport(report)); return; }
 
-            CountLabel.Text          = $"{_items.Count} report(s) shown.";
+            if (_mode == GalleryMode.Range)
+            {
+                _pendingLive++;              // don't disturb the range the user is reading
+                UpdateLiveHint();
+                return;
+            }
+
+            _items.Insert(0, report);
+            while (_items.Count > LiveSlots) _items.RemoveAt(_items.Count - 1);  // drop oldest / placeholder
+
+            UpdateCountLabel(_items.Count(r => !r.IsPlaceholder));
             EmptyLabel.Visibility    = Visibility.Collapsed;
             DownloadAllBtn.IsEnabled = true;
         }
@@ -130,7 +137,7 @@ namespace copperInspection
         private void CardView_Click(object sender, RoutedEventArgs e)
         {
             if ((sender as FrameworkElement)?.DataContext is not DefectReport r) return;
-            if (r.ImageData.Length == 0) return;
+            if (r.IsPlaceholder || r.ImageData.Length == 0) return;
 
             var img = new Image
             {
@@ -161,7 +168,7 @@ namespace copperInspection
         private void CardDownload_Click(object sender, RoutedEventArgs e)
         {
             if ((sender as FrameworkElement)?.DataContext is not DefectReport r) return;
-            if (r.ImageData.Length == 0) return;
+            if (r.IsPlaceholder || r.ImageData.Length == 0) return;
 
             var dlg = new SaveFileDialog
             {
@@ -195,7 +202,7 @@ namespace copperInspection
             int saved = 0, failed = 0;
             foreach (DefectReport r in reports)
             {
-                if (r.ImageData.Length == 0) continue;
+                if (r.IsPlaceholder || r.ImageData.Length == 0) continue;
                 try
                 {
                     File.WriteAllBytes(Path.Combine(dlg.FolderName, SuggestFileName(r)), r.ImageData);
@@ -225,6 +232,44 @@ namespace copperInspection
             bmp.EndInit();
             bmp.Freeze();
             return bmp;
+        }
+        // ══════════════════════════════════════════════════════
+        //  MODE
+        // ══════════════════════════════════════════════════════
+        /// <summary>
+        /// Swap the gallery between the fixed 2×3 live grid (no scrolling) and the
+        /// wrapping, scrollable date-range grid.
+        /// </summary>
+        private void ApplyMode(GalleryMode mode)
+        {
+            _mode = mode;
+            bool live = mode == GalleryMode.Live;
+
+            ReportsItems.ItemsPanel = (ItemsPanelTemplate)FindResource(live ? "LivePanel" : "RangePanel");
+            GalleryScroll.VerticalScrollBarVisibility =
+                live ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto;
+
+            if (live) { _pendingLive = 0; UpdateLiveHint(); }
+        }
+
+        /// <param name="real">Reports actually shown, not counting live placeholders.</param>
+        private void UpdateCountLabel(int real)
+            => CountLabel.Text = _mode == GalleryMode.Live
+                ? $"Live · {real} of {LiveSlots} slots filled."
+                : $"{real} report(s) shown.";
+
+        private void UpdateLiveHint()
+        {
+            if (_mode == GalleryMode.Range && _pendingLive > 0)
+            {
+                LiveHintLabel.Text = $"🔴  {_pendingLive} new result(s) captured — "
+                                   + "press \"Live — Last 6\" to see them.";
+                LiveHintLabel.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                LiveHintLabel.Visibility = Visibility.Collapsed;
+            }
         }
     }
 }

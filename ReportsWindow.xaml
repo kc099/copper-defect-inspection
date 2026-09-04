@@ -58,7 +58,7 @@
         <DataTemplate x:Key="ReportCard">
             <Border Background="#1A1A2E" CornerRadius="8" Margin="6"
                     BorderBrush="#2A2A44" BorderThickness="1" Padding="8">
-                <Grid>
+                <Grid x:Name="CardBody">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
@@ -68,20 +68,27 @@
                     </Grid.RowDefinitions>
 
                     <Border Grid.Row="0" Background="#000000" CornerRadius="5" MinHeight="80">
-                        <Image Source="{Binding ImageData, Converter={StaticResource BytesToImage}}"
-                               Stretch="Uniform"
-                               RenderOptions.BitmapScalingMode="HighQuality"/>
+                        <Grid>
+                            <Image Source="{Binding ImageData, Converter={StaticResource BytesToImage}}"
+                                   Stretch="Uniform"
+                                   RenderOptions.BitmapScalingMode="HighQuality"/>
+                            <TextBlock x:Name="CardEmptyNote" Text="Empty slot"
+                                       Foreground="#3A3A5A" FontSize="12"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                                       Visibility="Collapsed"/>
+                        </Grid>
                     </Border>
 
-                    <TextBlock Grid.Row="1" Text="{Binding DefectCount, StringFormat={}{0} defect(s)}"
+                    <TextBlock x:Name="CardCount" Grid.Row="1"
+                               Text="{Binding DefectCount, StringFormat={}{0} defect(s)}"
                                Foreground="#EF6B6B" FontSize="14" FontWeight="Bold"
                                Margin="2,8,0,0"/>
-                    <TextBlock Grid.Row="2" Text="{Binding DisplayText}"
+                    <TextBlock x:Name="CardTime" Grid.Row="2" Text="{Binding DisplayText}"
                                Foreground="#9090B8" FontSize="11" Margin="2,3,0,0"/>
-                    <TextBlock Grid.Row="3" Text="{Binding Method}"
+                    <TextBlock x:Name="CardMethod" Grid.Row="3" Text="{Binding Method}"
                                Foreground="#5C5C8C" FontSize="10" Margin="2,2,0,0"/>
 
-                    <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,8,0,0">
+                    <StackPanel x:Name="CardActions" Grid.Row="4" Orientation="Horizontal" Margin="0,8,0,0">
                         <Button Content="🔎  View" Style="{StaticResource CardBtn}"
                                 Click="CardView_Click" Margin="0,0,6,0"/>
                         <Button Content="⬇  Download" Style="{StaticResource CardBtn}"
@@ -89,7 +96,25 @@
                     </StackPanel>
                 </Grid>
             </Border>
+
+            <!-- An unfilled live slot: keep the frame, drop everything inside it. -->
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding IsPlaceholder}" Value="True">
+                    <Setter TargetName="CardBody"      Property="Opacity"    Value="0.35"/>
+                    <Setter TargetName="CardCount"     Property="Visibility" Value="Collapsed"/>
+                    <Setter TargetName="CardTime"      Property="Visibility" Value="Collapsed"/>
+                    <Setter TargetName="CardMethod"    Property="Visibility" Value="Collapsed"/>
+                    <Setter TargetName="CardActions"   Property="Visibility" Value="Collapsed"/>
+                    <Setter TargetName="CardEmptyNote" Property="Visibility" Value="Visible"/>
+                </DataTrigger>
+            </DataTemplate.Triggers>
         </DataTemplate>
+        <ItemsPanelTemplate x:Key="LivePanel">
+            <UniformGrid Rows="2" Columns="3"/>
+        </ItemsPanelTemplate>
+        <ItemsPanelTemplate x:Key="RangePanel">
+            <WrapPanel Orientation="Horizontal" ItemWidth="290" ItemHeight="310"/>
+        </ItemsPanelTemplate>
     </Window.Resources>
 
     <Grid>
@@ -113,7 +138,7 @@
 
                     <Button Content="🔍  Load Date Range" Style="{StaticResource ReportBtn}"
                             HorizontalAlignment="Stretch" Click="LoadRange_Click" Margin="0,0,0,8"/>
-                    <Button Content="🕒  Last 6 Runs" Style="{StaticResource ReportBtn}"
+                    <Button Content="🕒  Live — Last 6" Style="{StaticResource ReportBtn}"
                             HorizontalAlignment="Stretch" Click="LoadRecent_Click" Margin="0,0,0,16"/>
 
                     <Border Background="#2A2A44" Height="1" Margin="0,0,0,16"/>
@@ -124,6 +149,10 @@
 
                     <TextBlock x:Name="CountLabel" Text="" Foreground="#6C6C9C" FontSize="11"
                                TextWrapping="Wrap"/>
+
+                    <!-- Shown only in date-range mode, when live results arrived meanwhile. -->
+                    <TextBlock x:Name="LiveHintLabel" Foreground="#38BDF8" FontSize="11"
+                               TextWrapping="Wrap" Margin="0,8,0,0" Visibility="Collapsed"/>
                 </StackPanel>
             </DockPanel>
         </Border>
@@ -138,24 +167,22 @@
             <TextBlock x:Name="HeaderLabel" Grid.Row="0" Text="Recent Runs"
                        Foreground="#E8E8F8" FontSize="16" FontWeight="Bold" Margin="4,0,0,8"/>
 
-            <Border Grid.Row="1" Background="#0A0A16" CornerRadius="8" BorderBrush="#2A2A44" BorderThickness="1">
+            <Border Grid.Row="1" Background="#0A0A16" CornerRadius="8"
+        BorderBrush="#2A2A44" BorderThickness="1">
                 <Grid>
-                    <!-- No scrolling: the grid fills the whole area and its rows/columns
-                         are sized to the result count so every card is visible at once. -->
-                    <ItemsControl x:Name="ReportsItems" ItemTemplate="{StaticResource ReportCard}"
-                                  Margin="6">
-                        <ItemsControl.ItemsPanel>
-                            <ItemsPanelTemplate>
-                                <UniformGrid Rows="{Binding GridRows, RelativeSource={RelativeSource AncestorType=Window}}"
-                                             Columns="{Binding GridColumns, RelativeSource={RelativeSource AncestorType=Window}}"/>
-                            </ItemsPanelTemplate>
-                        </ItemsControl.ItemsPanel>
-                    </ItemsControl>
+                    <ScrollViewer x:Name="GalleryScroll"
+                      VerticalScrollBarVisibility="Disabled"
+                      HorizontalScrollBarVisibility="Disabled">
+                        <ItemsControl x:Name="ReportsItems"
+                          ItemTemplate="{StaticResource ReportCard}"
+                          ItemsPanel="{StaticResource LivePanel}"
+                          Margin="6"/>
+                    </ScrollViewer>
 
                     <TextBlock x:Name="EmptyLabel" Text="No reports to show."
-                               Foreground="#4A4A6A" FontSize="14"
-                               HorizontalAlignment="Center" VerticalAlignment="Center"
-                               Visibility="Collapsed"/>
+                   Foreground="#4A4A6A" FontSize="14"
+                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                   Visibility="Collapsed"/>
                 </Grid>
             </Border>
         </Grid>

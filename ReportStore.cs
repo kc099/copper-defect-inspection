@@ -47,6 +47,16 @@ namespace copperInspection
         [BsonIgnore]
         public string DisplayText =>
             $"{Timestamp.ToLocalTime():yyyy-MM-dd  HH:mm:ss}   ·   {DefectCount} defect{(DefectCount == 1 ? "" : "s")}";
+
+        /// <summary>
+        /// True for an empty frame that pads the live gallery out to its fixed slot
+        /// count. Never read from or written to Mongo.
+        /// </summary>
+        [BsonIgnore]
+        public bool IsPlaceholder { get; init; }
+
+        /// <summary>An empty frame standing in for an unfilled live slot.</summary>
+        public static DefectReport Placeholder() => new() { IsPlaceholder = true };
     }
 
     /// <summary>MongoDB access for inspection reports.</summary>
