@@ -18,5 +18,55 @@
   "ColorDiffThreshold": 80.0,
   "ColorDiffMinAreaPct": 0.5,
   "ColorDiffMorphKernel": 5,
-  "ReferenceColorPath": "Assets/reference_color1.json"
+  "ReferenceColorPath": "Assets/reference_color1.json",
+
+  "Scan": {
+    "Encoder": {
+      "BaseUrl": "http://192.168.0.193:5055",
+      "Path": "/encoder",
+      "PollHz": 50,
+      "TimeoutMs": 400,
+      "MaxStaleMs": 1200
+    },
+
+    "CaptureDelay": {
+      "Enabled": true,
+      "Ms": 80.0
+    },
+
+    "Geometry": {
+      "FovAlongTravelMm": 100,
+      "OverlapMm": 0.0,
+      "FirstTriggerOffsetMm": 0.0,
+      "TravelAxis": "X",
+      "TravelReversed": false,
+      "PxPerMmAlong": 0.0,
+      "PxPerMmAcross": 0.0,
+      "LargestDefectMm": 10.0,
+      "SafetyMarginMm": 5.0,
+      "DefectMergeOverlapFraction": 0.5
+    },
+
+    "Inspection": {
+      "Method": "PatchCore-R18",
+      "TwoStage": {
+        "Enabled": false,
+        "ScreenMethod": "ColorDiff"
+      }
+    },
+
+    "Run": {
+      "QueueCapacity": 6,
+      "IdleTimeoutSec": 20.0,
+      "StripLengthMm": 0,
+      "MaxLineSpeedMmPerSec": 170.0,
+      "StoreImagesFor": "defects-only",
+      "ShowBackgroundMaskWindow": true
+    },
+
+    "Simulate": {
+      "Enabled": false,
+      "SpeedMmPerSec": 166.7
+    }
+  }
 }

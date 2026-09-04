@@ -1,4 +1,4 @@
-using Microsoft.Win32;
+﻿using Microsoft.Win32;
 using OpenCvSharp;
 using OpenCvSharp.WpfExtensions;
 using System;
@@ -36,6 +36,19 @@ namespace copperInspection
         private DispatcherTimer? _liveViewTimer;
         private bool _liveViewActive = false;
 
+        // TEMPORARY: encoder + full scan-pipeline smoke-test - see
+        // StartEncoderProbe(). Not the real Strip Scan UI (no Arm/End Strip
+        // button, no batch ID field, no strip map) - but a TRIGGER here now
+        // really does capture a frame, run it through InspectionEngine, and
+        // write a real DefectReport + StripRun to MongoDB. Remove once C9
+        // (the real panel) exists.
+        private Scan.HttpEncoderSource? _encoderProbe;
+        private Scan.ScanPipeline? _scanPipelineProbe;
+        private Scan.StripRunRecorder? _stripRecorderProbe;
+        private Scan.ScanState _scanProbeLastState = Scan.ScanState.Idle;
+        private LiveMaskWindow? _liveMaskWindow;
+        private string _pitchNote = "";
+
 
         public MainWindow()
         {
@@ -53,6 +66,8 @@ namespace copperInspection
             // run it off the UI thread so a missing/slow camera never delays
             // the window opening.
             _ = InitCameraAsync();
+
+            StartEncoderProbe();
         }
 
         private void OnCameraLogLine(string line)
@@ -66,6 +81,307 @@ namespace copperInspection
                     CameraLogBox.Text = CameraLogBox.Text[^15000..];
                 CameraLogBox.ScrollToEnd();
             });
+        }
+
+        /// <summary>
+        /// TEMPORARY smoke-test, not the real Strip Scan UI: starts polling
+        /// Scan.Encoder.BaseUrl and routes every line into the same log box
+        /// the camera bridge uses (prefixed "[Encoder]"), plus
+        /// HttpEncoderSource already writes every line to Debug.WriteLine on
+        /// its own regardless of whether anything is listening here.
+        ///
+        /// Also arms a ScanController against the SAME live samples and logs
+        /// every trigger decision (prefixed "[Scan]"), so pressing the button
+        /// and changing speed in the mock's own web UI can be watched turning
+        /// into "TRIGGER segment N" lines in real time - no camera, no
+        /// inspection, just the trigger math against real encoder data.
+        ///
+        /// Polling itself is deliberately NOT gated on ScanConfig.Validate() -
+        /// that check also requires the pixel scale to be set (irrelevant to
+        /// "can this app reach the encoder over HTTP"). Arming the trigger
+        /// probe IS gated, but on a direct Pitch check rather than Validate(),
+        /// because Validate()'s other rules (pixel scale, encoder settings)
+        /// don't matter for exercising trigger math either - only geometry
+        /// does. The real pre-flight gate belongs on the future Arm button.
+        /// </summary>
+        private void StartEncoderProbe()
+        {
+            if (_config.Scan.Simulate.Enabled)
+            {
+                OnCameraLogLine("[Encoder] Scan.Simulate.Enabled is true - not polling HTTP.");
+                return;
+            }
+
+            try
+            {
+                _encoderProbe = new Scan.HttpEncoderSource(_config.Scan);
+            }
+            catch (InvalidOperationException ex)
+            {
+                // BaseUrl/Path don't form a valid URL - see EncoderSettings.TryBuildUri.
+                OnCameraLogLine($"[Encoder] not started: {ex.Message}");
+                return;
+            }
+
+            // These fire from the poll loop's own background thread;
+            // OnCameraLogLine already marshals to the UI thread via
+            // Dispatcher.BeginInvoke, same as it does for the camera bridge.
+            _encoderProbe.LogLineReceived += line => OnCameraLogLine($"[Encoder] {line}");
+            _encoderProbe.Faulted += why => OnCameraLogLine($"[Encoder] FAULT: {why}");
+
+            _ = ArmScanProbeAsync();
+
+            OnCameraLogLine($"[Encoder] polling {_config.Scan.Encoder.BaseUrl}{_config.Scan.Encoder.Path} " +
+                             $"at {_config.Scan.Encoder.PollHz} Hz…");
+            _encoderProbe.Start();
+        }
+
+       
+        private async Task ArmScanProbeAsync()
+        {
+            try
+            {
+                await ArmScanProbeCoreAsync();
+            }
+            catch (Exception ex)
+            {
+                OnCameraLogLine($"[Scan] not armed: unexpected error: {ex.GetType().Name}: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[Scan] ArmScanProbeAsync failed:\n{ex}");
+            }
+        }
+
+        private async Task ArmScanProbeCoreAsync()
+        {
+            double fov = _config.Scan.Geometry.FovAlongTravelMm;
+            double overlap = _config.Scan.Geometry.OverlapMm;
+            double pitch = Scan.ScanGeometry.PitchMm(_config.Scan);
+
+            if (fov <= 0)
+            {
+                OnCameraLogLine(
+                    "[Scan] not armed: Scan.Geometry.FovAlongTravelMm is 0 in config.json - " +
+                    "set it to something greater than OverlapMm before triggering can be tested.");
+                return;
+            }
+
+            if (pitch <= 0)
+            {
+                OnCameraLogLine(
+                    $"[Scan] not armed: FovAlongTravelMm ({fov:F1}) and OverlapMm ({overlap:F1}) give " +
+                    $"Pitch = {pitch:F1} mm. Pitch must be POSITIVE - it's how far the strip travels " +
+                    "between captures. In config.json, either raise Scan.Geometry.FovAlongTravelMm " +
+                    "above OverlapMm, or lower OverlapMm below FovAlongTravelMm. " +
+                    "e.g. FovAlongTravelMm: 100, OverlapMm: 25 -> Pitch = 75 mm.");
+                return;
+            }
+
+            bool useDiff = _config.BackgroundMethod == "ReferenceDiff";
+            if (useDiff)
+            {
+                // A diff-mode background image needs picking (the manual UI's
+                // ReferenceCombo); this probe has no UI for that, so refuse
+                // rather than crash on the first capture.
+                OnCameraLogLine(
+                    "[Scan] not armed: BackgroundMethod is \"ReferenceDiff\" in config.json, which needs " +
+                    "a background image path this probe doesn't collect. Switch BackgroundMethod to " +
+                    "\"Silhouette\" to test the probe, or wait for the real Strip Scan UI.");
+                return;
+            }
+
+            // The pipeline itself is built ONCE and lives for the whole
+            // session; only the recorder (and the MongoDB run it owns)
+            // is per-strip. "inspect" reads _stripRecorderProbe fresh on
+            // every call rather than capturing one instance, so it always
+            // routes to whichever strip is CURRENTLY open even after
+            // re-arming below swaps that field out for a new run.
+            _scanPipelineProbe = new Scan.ScanPipeline(
+                _config.Scan,
+                _encoderProbe!,
+                () => _camera.CaptureFullFrame(),
+                job => _stripRecorderProbe!.InspectSegmentAsync(job));
+
+            _scanPipelineProbe.SegmentFinished += rec => OnCameraLogLine(
+                $"[Scan] segment {rec.Segment}   [{rec.StartMm:F1}-{rec.EndMm:F1}]mm   " +
+                $"encoderMm={rec.EncoderMm:F1}   error={rec.TriggerErrorMm:F1}mm   " +
+                $"speed={rec.SpeedMmPerSec:F0}mm/s   -> {rec.Outcome}" +
+                (rec.Error != null ? $"   ({rec.Error})" : ""));
+
+            _scanPipelineProbe.Fault += why => OnCameraLogLine($"[Scan] FAULT: {why}");
+
+            _scanPipelineProbe.RunFinished += reason =>
+            {
+                OnCameraLogLine($"[Scan] run finished: {reason}");
+                _ = FinishAndRearmAsync(reason);
+            };
+
+            // Purely observational - logs Armed -> Scanning so the button
+            // press itself is visible, separate from each segment's own line.
+            _encoderProbe!.SampleReceived += _ =>
+            {
+                if (_scanPipelineProbe == null) return;
+                if (_scanPipelineProbe.State != _scanProbeLastState)
+                {
+                    _scanProbeLastState = _scanPipelineProbe.State;
+                    OnCameraLogLine($"[Scan] state -> {_scanProbeLastState}");
+                }
+            };
+
+            if (_config.Scan.Run.ShowBackgroundMaskWindow)
+            {
+                _liveMaskWindow = new LiveMaskWindow();
+
+                // This runs from the constructor, before THIS window has ever
+                // been shown - Left/Top default to NaN until then (Width is
+                // fine, it's set explicitly in XAML). Assigning NaN into a
+                // WindowStartupLocation="Manual" window's Left/Top can fail
+                // when WPF creates the native window, so only position it
+                // relative to the main window when that's actually known yet.
+                if (!double.IsNaN(Left) && !double.IsNaN(Top) && !double.IsNaN(Width))
+                {
+                    _liveMaskWindow.Left = Left + Width + 12;
+                    _liveMaskWindow.Top = Top;
+                }
+                _liveMaskWindow.Show();
+            }
+
+            _pitchNote = $"Pitch = {pitch:F1} mm (Fov {fov:F1} - Overlap {overlap:F1})";
+            await StartNewStripRunAsync(useDiff);
+        }
+
+        /// <summary>
+        /// Opens a fresh MongoDB StripRun and arms the (already-built,
+        /// long-lived) pipeline for it. Called once for the first strip, and
+        /// again every time RunFinished fires - see FinishAndRearmAsync -
+        /// so consecutive button presses in the mock keep working without
+        /// restarting the app. Every call gets its own StripRunRecorder
+        /// (each strip is its own Mongo document), which is why the
+        /// SegmentImagesReady subscriptions are (re)made here rather than
+        /// once at startup.
+        /// </summary>
+        private async Task StartNewStripRunAsync(bool useDiff)
+        {
+            var silhouette = new SilhouetteParams
+            {
+                Flatten = _config.FlattenLighting,
+                AutoThreshold = _config.AutoThreshold,
+                Threshold = _config.SilhouetteThreshold,
+                Morph = _config.SilhouetteMorphKernel,
+                Keep = _config.RegionsToKeep,
+                Fill = _config.FillHoles,
+            };
+            var diff = new DiffParams
+            {
+                Blur = _config.DiffBlur,
+                Threshold = _config.DiffThreshold,
+                Morph = _config.DiffMorphKernel,
+                Keep = _config.RegionsToKeep,
+                MatchExposure = _config.MatchExposure,
+                AllowResize = _config.AllowResize,
+            };
+
+            var recorder = new Scan.StripRunRecorder(
+                _config.Scan,
+                () => InspectionSettings.ForScan(
+                    _config.Scan, useDiff, backgroundPath: null, silhouette, diff,
+                    _config.ColorDiffThreshold, _config.ColorDiffMinAreaPct, _config.ColorDiffMorphKernel,
+                    _referenceColor?.Bgr ?? default),
+                GetOrLoadDetector);
+
+            // Push every scan-produced report into the live gallery in an
+            // already-open Reports window, the same way a manual capture
+            // does via SaveReportAsync - without this, scan reports land in
+            // MongoDB correctly but the open window just never hears about
+            // them, so it sits frozen at whatever it showed when opened.
+            recorder.ReportSaved += report =>
+                Dispatcher.BeginInvoke(() => _reportsWindow?.AddLiveReport(report));
+
+            if (_liveMaskWindow != null)
+            {
+                recorder.SegmentImagesReady += images =>
+                {
+                    // Fires on the pipeline's background consumer thread - the
+                    // Mats are only valid for the duration of this call (see
+                    // SegmentImagesReady's doc comment), so the conversion to
+                    // a BitmapSource, and the Freeze() that makes it safe to
+                    // hand to another thread, both happen synchronously here.
+                    BitmapSource bmp = MatToBmp(images.BackgroundSubtracted);
+                    bmp.Freeze();
+                    Dispatcher.BeginInvoke(() =>
+                        _liveMaskWindow?.UpdateImage(bmp, $"Segment {images.Segment} - Background Subtracted"));
+                };
+            }
+
+            // Mirror every capture into the main window's four result slots -
+            // only ONE physical camera exists right now (_camera), so "camera
+            // 1" and "camera 2" show the same images until a real second
+            // camera is wired up:
+            //   slot 1 (top-left)     = camera 1 feed      = the raw capture
+            //   slot 2 (top-right)    = camera 2 feed      = mirrored capture
+            //   slot 3 (bottom-left)  = camera 1 result     = heatmap overlay
+            //   slot 4 (bottom-right) = camera 2 result     = mirrored overlay
+            // NOTE: the static labels under these four boxes still read
+            // "Original / Background Subtracted / Distance from Reference /
+            // Defect Mask" - that's manual Run Detection's own, different
+            // mapping into these same four controls, left untouched.
+            recorder.SegmentImagesReady += images =>
+            {
+                BitmapSource feed = MatToBmp(images.Original);
+                BitmapSource result = MatToBmp(images.Overlay);
+                feed.Freeze();
+                result.Freeze();
+                Dispatcher.BeginInvoke(() =>
+                {
+                    Cam1TargetImage.Source = feed;     // camera 1 feed
+                    Cam1ResultImage.Source = feed;     // camera 2 feed (mirrored)
+                    Cam2TargetImage.Source = result;   // camera 1 result
+                    Cam2ResultImage.Source = result;   // camera 2 result (mirrored)
+                });
+            };
+
+            string batchId = $"probe-{DateTime.Now:yyyyMMdd-HHmmss}";
+            try
+            {
+                await recorder.StartAsync(batchId);
+            }
+            catch (Exception ex)
+            {
+                OnCameraLogLine($"[Scan] not armed: could not open a StripRun in MongoDB: {ex.Message}");
+                return;
+            }
+
+            _stripRecorderProbe = recorder;
+            _scanPipelineProbe!.Arm();
+            _scanProbeLastState = _scanPipelineProbe.State;
+
+            OnCameraLogLine(
+                $"[Scan] StripRun opened, batchId={batchId}   armed - {_pitchNote}. " +
+                "Waiting for the button press in the mock's /ui… " +
+                "(camera must already be Connected + Streaming for a trigger to capture anything)");
+        }
+
+        /// <summary>Closes out the strip that just ended, then immediately
+        /// re-arms for the next one - see StartNewStripRunAsync.</summary>
+        private async Task FinishAndRearmAsync(Scan.ScanEndReason reason)
+        {
+            if (_stripRecorderProbe == null || _scanPipelineProbe == null) return;
+
+            bool useDiff = _config.BackgroundMethod == "ReferenceDiff";
+            try
+            {
+                Scan.StripRun run = await _stripRecorderProbe.FinishAsync(_scanPipelineProbe.Records, reason);
+                OnCameraLogLine(
+                    $"[Scan] StripRun closed: {run.Verdict}   segments={run.SegmentCount}   " +
+                    $"defects={run.DefectCount}   coverageComplete={run.CoverageComplete}" +
+                    (run.MissingSegments.Count > 0
+                        ? $"   missing=[{string.Join(",", run.MissingSegments)}]"
+                        : ""));
+            }
+            catch (Exception ex)
+            {
+                OnCameraLogLine($"[Scan] could not finalise StripRun: {ex.Message}");
+            }
+
+            await StartNewStripRunAsync(useDiff);
         }
 
         // ══════════════════════════════════════════════════════
@@ -157,6 +473,16 @@ namespace copperInspection
             ColorDiffMorphKernel = _config.ColorDiffMorphKernel,
             ReferenceColorPath = _config.ReferenceColorPath,
 
+            // No UI edits this yet (no Strip Scan panel) - carry it forward
+            // unchanged. Without this line, CollectConfig() silently produces
+            // a brand-new default ScanConfig() instead (PipelineConfig.Scan's
+            // own field initializer), and every save - on app close AND on
+            // every "Run Detection" click - overwrites config.json's whole
+            // Scan block back to hard defaults. This was the actual cause of
+            // Scan.Encoder.BaseUrl/TimeoutMs/Geometry.FovAlongTravelMm
+            // repeatedly reverting during testing.
+            Scan = _config.Scan,
+
             LastFolder = string.IsNullOrWhiteSpace(_folderPath) ? null : _folderPath,
         };
 
@@ -166,6 +492,13 @@ namespace copperInspection
             ConfigStore.Save(_config);
             SetLiveViewActive(false);
             _camera.Dispose();
+            // Best-effort: End() drains the queue asynchronously and the
+            // window is closing regardless, so this may not finish before
+            // the process exits - acceptable for a smoke-test probe, not for
+            // the real Arm/End Strip UI later.
+            _scanPipelineProbe?.End();
+            _encoderProbe?.Dispose();
+            _liveMaskWindow?.Close();
             base.OnClosing(e);
         }
 
@@ -682,125 +1015,33 @@ namespace copperInspection
             StatusLabel.Text = $"Running pipeline ({detectionMethod})…";
             ClearResults();
 
-            Mat? original = null, bgSubtracted = null, heatmap = null, overlay = null;
+            // The pipeline itself lives in InspectionEngine, shared with the
+            // strip-scan consumer, so a manual run and a scanned segment can
+            // never drift apart in behaviour.
+            InspectionResult? result = null;
+            string? err = null;
             string bgNote = "";
             string verdict = "N/A";
-            double defectPct = 0.0;
-            string? err = null;
             string? appliedSegNote = null;
+
+            var settings = new InspectionSettings
+            {
+                UseDiff = useDiff,
+                BackgroundPath = bgPath,
+                Silhouette = silhouetteParams,
+                Diff = diffParams,
+                Method = detectionMethod,
+                ColorThreshold = colorThreshold,
+                ColorMinAreaPct = colorMinAreaPct,
+                ColorMorph = colorMorph,
+                ReferenceBgr = referenceBgr,
+            };
 
             await Task.Run(() =>
             {
                 try
                 {
-                    bool isPatchCore = detectionMethod.StartsWith("PatchCore");
-
-                    // For PatchCore, load the detector FIRST (before running
-                    // background subtraction) so its recorded segmentation
-                    // settings - the exact settings its training images were
-                    // built with - can override whatever the UI/config
-                    // snapshotted above. This is what stops WPF's segmentation
-                    // from silently drifting away from what the model was
-                    // actually trained on, which has produced wrong verdicts
-                    // more than once (docs/PATCHCORE_R50_FLOW_COMPARISON.md).
-                    // Applied every run, not just once, so a stray UI tweak
-                    // between runs can't reintroduce the drift.
-                    bool skipSegmentation = false;
-                    if (isPatchCore)
-                    {
-                        var detectorForSettings = GetOrLoadDetector(detectionMethod);
-                        var rec = detectorForSettings.SegmentationSettings;
-                        if (rec != null)
-                        {
-                            if (rec.Mode == "Silhouette")
-                            {
-                                if (useDiff)
-                                    throw new InvalidOperationException(
-                                        "This model was trained with Silhouette segmentation, but " +
-                                        "Reference-Image Diff is selected. Switch to Silhouette mode and retry.");
-                                silhouetteParams.Flatten = rec.Flatten ?? silhouetteParams.Flatten;
-                                silhouetteParams.AutoThreshold = rec.AutoThreshold ?? silhouetteParams.AutoThreshold;
-                                silhouetteParams.Threshold = rec.Threshold ?? silhouetteParams.Threshold;
-                                silhouetteParams.Morph = rec.Morph ?? silhouetteParams.Morph;
-                                silhouetteParams.Keep = rec.Keep ?? silhouetteParams.Keep;
-                                silhouetteParams.Fill = rec.Fill ?? silhouetteParams.Fill;
-                                appliedSegNote = "using the model's recorded training settings";
-                            }
-                            else if (rec.Mode == "ReferenceDiff")
-                            {
-                                if (!useDiff || bgPath == null)
-                                    throw new InvalidOperationException(
-                                        "This model was trained with Reference-Image Diff segmentation. " +
-                                        "Switch to that mode, pick a background image, and retry.");
-                                diffParams.Blur = rec.DiffBlur ?? diffParams.Blur;
-                                diffParams.Threshold = rec.DiffThreshold ?? diffParams.Threshold;
-                                diffParams.Morph = rec.DiffMorph ?? diffParams.Morph;
-                                diffParams.Keep = rec.DiffKeep ?? diffParams.Keep;
-                                diffParams.MatchExposure = rec.DiffMatchExposure ?? diffParams.MatchExposure;
-                                appliedSegNote = "using the model's recorded training settings";
-                            }
-                            else if (rec.Mode == "None")
-                            {
-                                skipSegmentation = true;
-                                appliedSegNote = "segmentation skipped - model was trained on raw, unsegmented images";
-                            }
-                        }
-                    }
-
-                    Mat target = loadTarget(isPatchCore);
-                    original = target;
-
-                    // 1. Background Subtraction Stage
-                    BackgroundResult bgResult;
-                    if (skipSegmentation)
-                    {
-                        bgResult = new BackgroundResult
-                        {
-                            Result = target.Clone(),
-                            Mask = new Mat(target.Size(), MatType.CV_8UC1, Scalar.All(255)),
-                            Note = "No segmentation (model trained on raw images)",
-                        };
-                    }
-                    else if (useDiff)
-                    {
-                        using Mat bg = isPatchCore ? ImageLoader.LoadFull(bgPath!) : ImageLoader.LoadResized(bgPath!);
-                        bgResult = BackgroundSubtraction.SubtractBackground(bg, target, diffParams);
-                    }
-                    else
-                    {
-                        bgResult = BackgroundSubtraction.SegmentSilhouette(target, silhouetteParams);
-                    }
-                    bgNote = bgResult.Note;
-                    bgSubtracted = bgResult.Result.Clone();
-
-                    // 2. Inspection Stage (PatchCore vs ColorDiff)
-                    if (detectionMethod.StartsWith("PatchCore"))
-                    {
-                        var detector = GetOrLoadDetector(detectionMethod);
-                        // overlayBase = the raw photo (pre-background-subtraction) -
-                        // slot 4 shows the heatmap blended onto THAT, not the
-                        // background-subtracted view.
-                        var (isDefect, score, heatmapRaw, heatmapOnOriginal) =
-                            detector.Inspect(bgResult.Result, target);
-
-                        verdict = isDefect ? "BAD" : "GOOD";
-                        defectPct = score; // Using max anomaly score for PatchCore
-
-                        heatmap = heatmapRaw;       // slot 3 - pure anomaly heatmap
-                        overlay = heatmapOnOriginal; // slot 4 - heatmap blended onto the original image
-                    }
-                    else
-                    {
-                        using ColorDiffResult colorResult = ColorDiffDetector.Inspect(
-                            bgResult.Result, referenceBgr, colorThreshold, colorMinAreaPct, colorMorph);
-                        verdict = colorResult.Verdict;
-                        defectPct = colorResult.DefectPct;
-                        heatmap = ColorDiffDetector.DistanceHeatmap(
-                            bgResult.Result, colorResult.DistanceMap, colorResult.ContentMask);
-                        overlay = ColorDiffDetector.MaskOverlay(bgResult.Result, colorResult.DefectMask);
-                    }
-
-                    bgResult.Dispose();
+                    result = InspectionEngine.Run(loadTarget, settings, GetOrLoadDetector);
                 }
                 catch (Exception ex)
                 {
@@ -815,72 +1056,79 @@ namespace copperInspection
                 StatusLabel.Text = "Detection failed.";
                 MessageBox.Show($"Error:\n\n{err}", "Detection Failed",
                     MessageBoxButton.OK, MessageBoxImage.Error);
-                original?.Dispose(); bgSubtracted?.Dispose(); heatmap?.Dispose(); overlay?.Dispose();
+                result?.Dispose();
                 return;
             }
-            if (original == null || bgSubtracted == null || heatmap == null || overlay == null) return;
+            if (result == null) return;
 
-            // Reflect whatever segmentation settings actually ran back onto
-            // the controls, so the UI never shows something different from
-            // what was fed to the model - silhouetteParams/diffParams may
-            // have been overridden above by the PatchCore model's recorded
-            // training settings.
-            if (appliedSegNote != null)
+            using (result)
             {
-                FlattenLightingCheck.IsChecked = silhouetteParams.Flatten;
-                AutoThresholdCheck.IsChecked = silhouetteParams.AutoThreshold;
-                SilhouetteThresholdSlider.Value = silhouetteParams.Threshold;
-                DiffBlurSlider.Value = diffParams.Blur;
-                DiffThresholdSlider.Value = diffParams.Threshold;
-            }
-
-            Cam1TargetImage.Source = MatToBmp(original);
-            Cam1ResultImage.Source = MatToBmp(bgSubtracted);
-            Cam2TargetImage.Source = MatToBmp(heatmap);
-            Cam2ResultImage.Source = MatToBmp(overlay);
-
-            // ── Save report to MongoDB ──
-            try
-            {
-                Cv2.ImEncode(".png", overlay, out byte[] png);
-                var report = new DefectReport
+                // Reflect whatever segmentation settings actually ran back onto
+                // the controls, so the UI never shows something different from
+                // what was fed to the model - the engine may have overridden
+                // them with the PatchCore model's recorded training settings.
+                if (result.SegmentationNote != null &&
+                    result.AppliedSilhouette != null && result.AppliedDiff != null)
                 {
-                    Timestamp = DateTime.UtcNow,
-                    DefectCount = verdict == "BAD" ? 1 : 0,
-                    Method = detectionMethod,
-                    Mode = useDiff ? "ReferenceDiff" : "Silhouette",
-                    ReferenceImage = useDiff ? (ReferenceCombo.SelectedItem as string ?? string.Empty) : string.Empty,
-                    TargetImage = targetLabel,
-                    ImageData = png,
-                    ResultImageBase64 = "data:image/png;base64," + Convert.ToBase64String(png)
-                };
-                _ = SaveReportAsync(report);
-            }
-            catch (Exception ex)
-            {
-                StatusLabel.Text = $"Report not saved: {ex.Message}";
-            }
+                    FlattenLightingCheck.IsChecked = result.AppliedSilhouette.Flatten;
+                    AutoThresholdCheck.IsChecked = result.AppliedSilhouette.AutoThreshold;
+                    SilhouetteThresholdSlider.Value = result.AppliedSilhouette.Threshold;
+                    DiffBlurSlider.Value = result.AppliedDiff.Blur;
+                    DiffThresholdSlider.Value = result.AppliedDiff.Threshold;
+                }
 
-            original.Dispose(); bgSubtracted.Dispose(); heatmap.Dispose(); overlay.Dispose();
+                Cam1TargetImage.Source = MatToBmp(result.Original);
+                Cam1ResultImage.Source = MatToBmp(result.BackgroundSubtracted);
+                Cam2TargetImage.Source = MatToBmp(result.Heatmap);
+                Cam2ResultImage.Source = MatToBmp(result.Overlay);
 
-            if (verdict == "BAD")
-            {
-                string subLabel = detectionMethod.StartsWith("PatchCore") ? $"Score: {defectPct:F3}" : $"{defectPct:F2}% defect area";
-                DefectCountLabel.Text = $"⚠ BAD ({subLabel})";
-                DefectBadge.Visibility = Visibility.Visible;
-                OkBadge.Visibility = Visibility.Collapsed;
-            }
-            else if (verdict == "GOOD")
-            {
-                string subLabel = detectionMethod.StartsWith("PatchCore") ? $"Score: {defectPct:F3}" : $"{defectPct:F2}% defect area";
-                OkBadgeLabel.Text = $"✓ GOOD ({subLabel})";
-                DefectBadge.Visibility = Visibility.Collapsed;
-                OkBadge.Visibility = Visibility.Visible;
-            }
-            else
-            {
-                DefectBadge.Visibility = Visibility.Collapsed;
-                OkBadge.Visibility = Visibility.Collapsed;
+                // ── Save report to MongoDB ──
+                try
+                {
+                    Cv2.ImEncode(".png", result.Overlay, out byte[] png);
+                    var report = new DefectReport
+                    {
+                        Timestamp = DateTime.UtcNow,
+                        DefectCount = result.IsDefect ? 1 : 0,
+                        Method = result.Method,
+                        Mode = useDiff ? "ReferenceDiff" : "Silhouette",
+                        ReferenceImage = useDiff ? (ReferenceCombo.SelectedItem as string ?? string.Empty) : string.Empty,
+                        TargetImage = targetLabel,
+                        ImageData = png,
+                        ResultImageBase64 = "data:image/png;base64," + Convert.ToBase64String(png)
+                    };
+                    _ = SaveReportAsync(report);
+                }
+                catch (Exception ex)
+                {
+                    StatusLabel.Text = $"Report not saved: {ex.Message}";
+                }
+
+                bgNote = result.BackgroundNote;
+                appliedSegNote = result.SegmentationNote;
+                verdict = result.Verdict;
+
+                string subLabel = result.Method.StartsWith("PatchCore")
+                    ? $"Score: {result.Score:F3}"
+                    : $"{result.Score:F2}% defect area";
+
+                if (verdict == "BAD")
+                {
+                    DefectCountLabel.Text = $"⚠ BAD ({subLabel})";
+                    DefectBadge.Visibility = Visibility.Visible;
+                    OkBadge.Visibility = Visibility.Collapsed;
+                }
+                else if (verdict == "GOOD")
+                {
+                    OkBadgeLabel.Text = $"✓ GOOD ({subLabel})";
+                    DefectBadge.Visibility = Visibility.Collapsed;
+                    OkBadge.Visibility = Visibility.Visible;
+                }
+                else
+                {
+                    DefectBadge.Visibility = Visibility.Collapsed;
+                    OkBadge.Visibility = Visibility.Collapsed;
+                }
             }
 
             string modeNote = useDiff ? "reference-image diff" : "silhouette";
@@ -906,6 +1154,23 @@ namespace copperInspection
             _reportsWindow = new ReportsWindow { Owner = this };
             _reportsWindow.Closed += (_, _) => _reportsWindow = null;
             _reportsWindow.Show();
+        }
+
+        private StripRunsWindow? _stripRunsWindow;
+
+        private void StripRunsMenuItem_Click(object sender, RoutedEventArgs e)
+        {
+            if (_stripRunsWindow != null)
+            {
+                if (_stripRunsWindow.WindowState == WindowState.Minimized)
+                    _stripRunsWindow.WindowState = WindowState.Normal;
+                _stripRunsWindow.Activate();
+                return;
+            }
+
+            _stripRunsWindow = new StripRunsWindow { Owner = this };
+            _stripRunsWindow.Closed += (_, _) => _stripRunsWindow = null;
+            _stripRunsWindow.Show();
         }
 
         private async Task SaveReportAsync(DefectReport report)

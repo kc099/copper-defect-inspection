@@ -1,0 +1,89 @@
+[Encoder] poll ok   seq=534949   mm=5142802.22  pos=  17647.37  zeroCount=113  age=328ms
+'copperInspection.exe' (CoreCLR: clrhost): Loaded 'C:\Program Files\dotnet\shared\Microsoft.NETCore.App\10.0.9\System.Diagnostics.StackTrace.dll'. Skipped loading symbols. Module is optimized and the debugger option 'Just My Code' is enabled.
+[Encoder] poll ok   seq=534962   mm=5142849.55  pos=  17694.71  zeroCount=113  age=241ms
+[Encoder] poll ok   seq=534975   mm=5142893.09  pos=  17738.24  zeroCount=113  age=257ms
+[Encoder] poll ok   seq=534989   mm=5142935.35  pos=  17780.51  zeroCount=113  age=258ms
+[Encoder] poll ok   seq=535001   mm=5142978.81  pos=  17823.96  zeroCount=113  age=254ms
+[Encoder] poll ok   seq=535013   mm=5143019.02  pos=  17864.17  zeroCount=113  age=246ms
+[Encoder] poll ok   seq=535025   mm=5143059.75  pos=  17904.90  zeroCount=113  age=239ms
+[Encoder] poll ok   seq=535039   mm=5143103.00  pos=  17948.15  zeroCount=113  age=260ms
+'copperInspection.exe' (CoreCLR: clrhost): Loaded 'D:\wpf_app\copperInspection\bin\x64\Debug\net10.0-windows\OpenCvSharp.WpfExtensions.dll'. Skipped loading symbols. Module is optimized and the debugger option 'Just My Code' is enabled.
+[Encoder] poll ok   seq=535051   mm=5143143.10  pos=  17988.25  zeroCount=113  age=237ms
+[Encoder] poll ok   seq=535063   mm=5143186.57  pos=  18031.72  zeroCount=113  age=266ms
+[Encoder] poll ok   seq=535076   mm=5143230.10  pos=  18075.26  zeroCount=113  age=252ms
+[Encoder] poll ok   seq=535089   mm=5143272.50  pos=  18117.65  zeroCount=113  age=261ms
+[Encoder] poll ok   seq=535102   mm=5143317.08  pos=  18162.24  zeroCount=113  age=266ms
+[Encoder] poll ok   seq=535115   mm=5143360.22  pos=  18205.37  zeroCount=113  age=252ms
+[Encoder] poll ok   seq=535129   mm=5143402.13  pos=  18247.28  zeroCount=113  age=258ms
+[Encoder] poll ok   seq=535142   mm=5143445.83  pos=  18290.99  zeroCount=113  age=247ms
+[Encoder] poll ok   seq=535154   mm=5143486.17  pos=  18331.33  zeroCount=113  age=258ms
+[Encoder] poll ok   seq=535167   mm=5143529.50  pos=  18374.66  zeroCount=113  age=244ms
+[Encoder] poll ok   seq=535179   mm=5143569.11  pos=  18414.26  zeroCount=113  age=257ms
+[Encoder] poll ok   seq=535192   mm=5143612.77  pos=  18457.92  zeroCount=113  age=253ms
+[Encoder] poll ok   seq=535203   mm=5143653.18  pos=  18498.33  zeroCount=113  age=260ms
+[Encoder] poll ok   seq=535216   mm=5143698.74  pos=  18543.89  zeroCount=113  age=256ms
+[Encoder] poll ok   seq=535229   mm=5143742.50  pos=  18587.66  zeroCount=113  age=270ms
+[Encoder] poll ok   seq=535242   mm=5143786.56  pos=  18631.71  zeroCount=113  age=248ms
+[Encoder] poll ok   seq=535254   mm=5143829.93  pos=  18675.09  zeroCount=113  age=262ms
+'copperInspection.exe' (CoreCLR: clrhost): Loaded 'C:\Program Files\dotnet\shared\Microsoft.NETCore.App\10.0.9\System.Net.Quic.dll'. Skipped loading symbols. Module is optimized and the debugger option 'Just My Code' is enabled.
+[Encoder] poll ok   seq=535267   mm=5143871.93  pos=  18717.08  zeroCount=113  age=261ms
+[Encoder] poll ok   seq=535281   mm=5143918.81  pos=  18763.97  zeroCount=113  age=251ms
+[Encoder] poll ok   seq=535294   mm=5143963.11  pos=  18808.26  zeroCount=113  age=266ms
+[Encoder] poll ok   seq=535306   mm=5144005.29  pos=  18850.45  zeroCount=113  age=248ms
+[Encoder] poll ok   seq=535319   mm=5144049.58  pos=  18894.73  zeroCount=113  age=270ms
+[Encoder] poll ok   seq=535332   mm=5144093.80  pos=  18938.96  zeroCount=113  age=259ms
+[Encoder] poll ok   seq=535345   mm=5144135.75  pos=  18980.91  zeroCount=113  age=243ms
+[Encoder] poll ok   seq=535356   mm=5144175.63  pos=  19020.79  zeroCount=113  age=246ms
+'copperInspection.exe' (CoreCLR: clrhost): Loaded 'C:\Program Files\dotnet\shared\Microsoft.NETCore.App\10.0.9\System.Reflection.Metadata.dll'. Skipped loading symbols. Module is optimized and the debugger option 'Just My Code' is enabled.
+[Encoder] poll ok   seq=535368   mm=5144215.91  pos=  19061.06  zeroCount=113  age=242ms
+[Encoder] poll ok   seq=535381   mm=5144259.22  pos=  19104.38  zeroCount=113  age=261ms
+[Encoder] poll ok   seq=535392   mm=5144301.90  pos=  19147.05  zeroCount=113  age=250ms
+[Encoder] poll ok   seq=535405   mm=5144346.07  pos=  19191.23  zeroCount=113  age=263ms
+[Encoder] poll ok   seq=535418   mm=5144389.69  pos=  19234.84  zeroCount=113  age=269ms
+[Encoder] poll ok   seq=535432   mm=5144435.29  pos=     18.09  zeroCount=114  age=266ms
+[Encoder] poll ok   seq=535445   mm=5144479.24  pos=     62.03  zeroCount=114  age=275ms
+[Encoder] poll ok   seq=535459   mm=5144526.35  pos=    109.14  zeroCount=114  age=281ms
+[Encoder] poll ok   seq=535473   mm=5144572.92  pos=    155.71  zeroCount=114  age=260ms
+[Encoder] poll ok   seq=535486   mm=5144619.32  pos=    202.12  zeroCount=114  age=265ms
+[Encoder] poll ok   seq=535500   mm=5144664.05  pos=    246.85  zeroCount=114  age=260ms
+[Encoder] poll ok   seq=535512   mm=5144705.90  pos=    288.69  zeroCount=114  age=237ms
+[Encoder] poll ok   seq=535524   mm=5144746.21  pos=    329.00  zeroCount=114  age=249ms
+[Encoder] poll ok   seq=535536   mm=5144786.80  pos=    369.60  zeroCount=114  age=256ms
+[Encoder] poll ok   seq=535551   mm=5144836.10  pos=    418.90  zeroCount=114  age=262ms
+[Encoder] poll ok   seq=535564   mm=5144879.09  pos=    461.88  zeroCount=114  age=250ms
+[Encoder] poll ok   seq=535576   mm=5144919.90  pos=    502.70  zeroCount=114  age=261ms
+[Encoder] poll ok   seq=535590   mm=5144965.50  pos=     43.09  zeroCount=115  age=267ms
+[Encoder] poll ok   seq=535604   mm=5145008.81  pos=     27.17  zeroCount=116  age=268ms
+[Encoder] poll ok   seq=535618   mm=5145053.42  pos=     29.81  zeroCount=117  age=255ms
+[Encoder] poll ok   seq=535631   mm=5145094.16  pos=     22.60  zeroCount=118  age=237ms
+[Encoder] poll ok   seq=535645   mm=5145139.44  pos=     67.89  zeroCount=118  age=256ms
+[Encoder] poll ok   seq=535658   mm=5145182.31  pos=     18.42  zeroCount=119  age=258ms
+[Encoder] poll ok   seq=535670   mm=5145223.83  pos=     59.94  zeroCount=119  age=246ms
+[Encoder] poll ok   seq=535682   mm=5145264.86  pos=    100.97  zeroCount=119  age=241ms
+[Encoder] poll ok   seq=535694   mm=5145305.71  pos=    141.82  zeroCount=119  age=247ms
+[Encoder] poll ok   seq=535706   mm=5145346.55  pos=    182.65  zeroCount=119  age=259ms
+[Encoder] poll ok   seq=535721   mm=5145385.55  pos=    221.66  zeroCount=119  age=275ms
+[Encoder] poll ok   seq=535734   mm=5145385.55  pos=    221.66  zeroCount=119  age=248ms
+[Encoder] poll ok   seq=535746   mm=5145385.55  pos=    221.66  zeroCount=119  age=234ms
+[Encoder] poll ok   seq=535758   mm=5145385.55  pos=    221.66  zeroCount=119  age=260ms
+[Encoder] poll ok   seq=535772   mm=5145385.55  pos=      0.00  zeroCount=120  age=238ms
+[Encoder] poll ok   seq=535783   mm=5145385.55  pos=      0.00  zeroCount=120  age=244ms
+[Encoder] poll ok   seq=535795   mm=5145385.55  pos=      0.00  zeroCount=120  age=229ms
+[Encoder] poll ok   seq=535807   mm=5145403.48  pos=     17.93  zeroCount=120  age=248ms
+[Encoder] poll ok   seq=535819   mm=5145443.77  pos=     58.21  zeroCount=120  age=250ms
+[Encoder] poll ok   seq=535832   mm=5145485.51  pos=     99.96  zeroCount=120  age=247ms
+[Encoder] poll ok   seq=535846   mm=5145529.43  pos=     37.27  zeroCount=121  age=265ms
+[Encoder] poll ok   seq=535858   mm=5145573.27  pos=     81.11  zeroCount=121  age=272ms
+[Encoder] poll ok   seq=535871   mm=5145615.52  pos=    123.36  zeroCount=121  age=246ms
+[Encoder] poll ok   seq=535883   mm=5145659.22  pos=    167.05  zeroCount=121  age=246ms
+[Encoder] poll ok   seq=535895   mm=5145699.65  pos=    207.49  zeroCount=121  age=257ms
+[Encoder] poll ok   seq=535907   mm=5145743.49  pos=    251.33  zeroCount=121  age=262ms
+[Encoder] poll ok   seq=535921   mm=5145789.09  pos=    296.93  zeroCount=121  age=271ms
+[Encoder] poll ok   seq=535935   mm=5145836.91  pos=    344.75  zeroCount=121  age=265ms
+[Encoder] poll ok   seq=535947   mm=5145880.20  pos=    388.04  zeroCount=121  age=273ms
+[Encoder] poll ok   seq=535960   mm=5145923.57  pos=    431.40  zeroCount=121  age=238ms
+[Encoder] poll ok   seq=535973   mm=5145967.21  pos=    475.05  zeroCount=121  age=270ms
+The thread 'CameraBridgePreviewReader' (9988) has exited with code 0 (0x0).
+Exception thrown: 'System.Threading.Tasks.TaskCanceledException' in System.Private.CoreLib.dll
+Exception thrown: 'System.Threading.Tasks.TaskCanceledException' in System.Private.CoreLib.dll
+The program '[6724] copperInspection.exe' has exited with code 0 (0x0)

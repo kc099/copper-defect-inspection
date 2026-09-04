@@ -1,109 +1,177 @@
-# Strip Scan — Build Plan (HTTP encoder, 10 cm FOV, producer/consumer)
+# Strip Scan — Build Plan (HTTP encoder, producer/consumer)
 
 Companion to [CONTINUOUS_STRIP_SCAN_PLAN.md](CONTINUOUS_STRIP_SCAN_PLAN.md),
-which covers the geometry and the *why*. This one is the **build plan**: what
-the new facts change, the flow in plain block diagrams, and **who does which
-task — you or me**.
+which covers the geometry and the *why*. This one is the **build plan**: the
+flow in plain block diagrams, the settings, what the PCB must send, and **who
+does which task — you or me**.
 
-Nothing here is implemented yet. This is the agreed shape before code.
+Nothing is implemented yet.
 
 ---
 
-## 1. What you told me, and what it settles
+## 1. Decisions locked in so far
 
-| New fact | What it settles |
+| Fact | What it settles |
 |---|---|
-| Encoder distance arrives **over HTTP from a PCB** | We poll an IP address. Needs a request/response contract (§4) and an IP in config. Replaces the serial/MCU design in the older doc. |
-| Button is pressed **when the strip has fully come into the FOV** | **This resolves the off-by-one-FOV question.** Your convention means `FirstTriggerOffsetMm = 0` — frame 1 fires immediately at the press. See below. |
-| FOV is more like **10 cm**, not 1 m | Changes the throughput numbers by ~10×. This is the big one — §2. |
-| Frames keep arriving → **producer/consumer loops** | Confirms the queue design. Producer captures and tags; consumer feeds the pipeline one frame at a time. §5. |
-| FOV length and IP must be **editable in production** | Config file, re-read at the start of every run. §6. |
-
-### The trigger formula is now simple
-
-Because the button is pressed when the strip **already fills** the FOV, the
-material under the camera at that instant is strip `0 … Fov`. So:
-
-```
-    capture n fires at    d = (n − 1) × Pitch
-    where                 Pitch = Fov − Overlap
-    frame n covers strip  [ (n−1)×Pitch , (n−1)×Pitch + Fov ]
-```
-
-Frame 1 fires at `d = 0` — on the button press itself, exactly as you
-described. No offset needed. (The older doc's §2.1 kept both conventions open;
-yours is the `Offset = 0` one, and I'll hard-default it to that.)
+| Encoder distance arrives **over HTTP from a PCB** | We poll an IP address. Contract in §5. IP lives in config. |
+| Button pressed **when the strip has fully entered the FOV** | Frame 1 fires at `d = 0` — on the press itself. `FirstTriggerOffsetMm = 0`. |
+| **PatchCore-R18 only** | R50 is out of the scan path. Lower inference time, one model to keep loaded. |
+| Two-stage inspection is a **config toggle** | Off by default; flip it on if R18 can't hold the frame budget. §4.3 |
+| Capture delay must be **settable and switchable** | `CaptureDelay.Enabled` + `CaptureDelay.Ms`, same file as the IP. §3.3 |
+| PCB sends **millimetres directly**, already correct | No counts, no `MmPerCount`, no unit conversion anywhere in the app. §5.1 |
+| Defect **position on the strip** must be stored | Every defect gets `startMm`/`endMm` in the database. §7 |
+| FOV is **not yet known** — 10 cm was an example | Everything below is parametric. Measuring it is task **Y3**. |
 
 ---
 
-## 2. ⚠ Reality check: 10 cm FOV is ~10× harder than 1 m
+## 2. What "pitch" means
 
-I ran the numbers before writing this, because a 100 mm FOV changes what is
-and isn't feasible. At **10 m/min = 166.7 mm/s**:
+**Pitch is how far the strip travels between one capture and the next.**
 
-### 2.1 Throughput
+```
+                  Pitch  =  Fov  −  Overlap
 
-| FOV | Overlap | Pitch | Frames/sec | Time between frames | Segments per 10 m |
+   Fov      = how much strip the camera sees in one frame (measure with a tape)
+   Overlap  = deliberate re-imaging at each seam, so nothing falls in a crack
+   Pitch    = the trigger interval, in millimetres of encoder travel
+```
+
+The whole scan loop is then one line:
+
+```
+   capture n fires when   d  =  (n − 1) × Pitch
+   frame n covers strip   [ (n−1)×Pitch  ,  (n−1)×Pitch + Fov ]
+```
+
+`d` is encoder distance since the button press. Frame 1 at `d = 0`, frame 2 at
+`d = Pitch`, frame 3 at `d = 2×Pitch`, and so on. **No timers anywhere** —
+the line can speed up, slow down, or stop, and the frames still land on the
+same places on the strip.
+
+Pitch is **never stored in the config file** — it is computed from `Fov` and
+`Overlap`. Storing all three invites them to disagree, and a disagreement here
+means silent gaps in coverage.
+
+### 2.1 Coverage picture
+
+Example only, with `Fov = 100`, `Overlap = 20`, so `Pitch = 80`:
+
+```
+            0         100       200       300       400  mm
+            ├─────────┼─────────┼─────────┼─────────┼──▶
+  frame 1   [========]                                     0 – 100
+  frame 2           [========]                            80 – 180
+  frame 3                   [========]                   160 – 260
+  frame 4                           [========]           240 – 340
+                    ├┤
+                    20 mm overlap at every seam, so a defect landing
+                    on a boundary is whole in one of the two frames,
+                    and no timing error can open an un-imaged gap
+```
+
+---
+
+## 3. Sizing: plug in your real numbers
+
+Earlier I ran the throughput numbers as if the FOV really were 10 cm. It was
+your example figure, so treat this section as the **formulas plus a lookup
+table**, and fill in the real FOV once you've measured it (Y3).
+
+### 3.1 How to size the overlap
+
+Overlap is **an absolute number of millimetres, not a percentage of the FOV.**
+The things it has to absorb — position error and defect size — don't shrink
+when the FOV shrinks.
+
+```
+   Overlap_min  =  v_max × (poll_interval + latency_residual)
+                 + largest_defect_length
+                 + safety_margin
+```
+
+At 166.7 mm/s (10 m/min), the first term alone:
+
+| Capture delay compensation | Poll rate | Position error |
+|---|---:|---:|
+| **On** (residual ≈ 20 % of an 80 ms delay) | 50 Hz | **6.0 mm** |
+| On | 20 Hz | 11.0 mm |
+| **Off** (full 80 ms uncompensated) | 50 Hz | **16.7 mm** |
+| Off | 20 Hz | 21.7 mm |
+
+So: add your largest expected defect length and a margin on top. A starting
+value of **25 mm** is reasonable for most cases and is what the table below
+assumes. Note the payoff of the `CaptureDelay` toggle — leaving it **off costs
+you ~10 mm of overlap**, which matters a lot at a small FOV and not at all at
+a large one.
+
+### 3.2 Throughput vs FOV
+
+Overlap fixed at 25 mm, speed 166.7 mm/s:
+
+| FOV | Pitch | Frames/sec | **Budget per frame** | Segments per 10 m | Overlap as % of FOV |
 |---:|---:|---:|---:|---:|---:|
-| 1000 mm | 80 | 920 mm | 0.18 | 5520 ms | 11 |
-| 100 mm | 10 | 90 mm | 1.85 | 540 ms | 111 |
-| **100 mm** | **20** | **80 mm** | **2.08** | **480 ms** | **125** |
-| 100 mm | 25 | 75 mm | 2.22 | 450 ms | 133 |
+| 50 mm | 25 mm | 6.67 | **150 ms** | 400 | 50 % |
+| 100 mm | 75 mm | 2.22 | **450 ms** | 133 | 25 % |
+| 200 mm | 175 mm | 0.95 | **1050 ms** | 57 | 12 % |
+| 300 mm | 275 mm | 0.61 | **1650 ms** | 36 | 8 % |
+| 500 mm | 475 mm | 0.35 | **2850 ms** | 21 | 5 % |
+| 1000 mm | 975 mm | 0.17 | **5850 ms** | 10 | 2 % |
 
-**The consumer now has ~480 ms to inspect one frame.** With a 1 m FOV it had
-5.5 seconds. If PatchCore inference takes longer than 480 ms, the queue backs
-up and segments get dropped — i.e. strip goes uninspected.
+**"Budget per frame" is the number that matters.** It is how long the consumer
+has to inspect one frame before the queue starts backing up. Compare it
+against your measured PatchCore-R18 time (task **Y1**) — that single
+comparison decides whether we need two-stage inspection.
 
-> **This is the first thing to measure** (task Y1 below). Time one detection
-> run in the app you already have. If it is over ~400 ms, we need a plan —
-> options in §5.3, none of them hard, but the choice changes the design.
+A small FOV is not free: it buys resolution and costs frame rate, storage, and
+overlap efficiency, all roughly linearly.
 
-### 2.2 The position error budget no longer fits in a 10 mm overlap
+### 3.3 Capture delay — what the setting does
 
-| Error source | At 166.7 mm/s |
-|---|---:|
-| HTTP poll interval @ 20 Hz | 8.33 mm |
-| HTTP poll interval @ 50 Hz | 3.33 mm |
-| Capture latency 50 ms | 8.33 mm |
-| Capture latency 150 ms | 25.00 mm |
+Between "the encoder says we're at the trigger distance" and "the shutter
+actually opens" there is real time: the HTTP poll, the pipe round trip to
+`CameraBridge.exe`, and the camera's own latency. The strip does not wait.
 
-A 10 % overlap on a 100 mm FOV is only 10 mm — **smaller than the plausible
-error**, which means gaps: strip that was never imaged but that the report
-counts as inspected. Two fixes, use both:
+```
+   trigger decision                       shutter opens
+        │                                       │
+        │◀────────── CaptureDelay.Ms ──────────▶│
+        │                                       │
+   strip here                            strip has moved
+                                         v × delay further on
+```
 
-1. **Overlap 20–25 mm** (20–25 %), not 10 %. Costs ~12 % more frames.
-2. **Interpolate between HTTP polls** (§4.3) instead of using the last polled
-   value raw. This removes the poll-interval error almost entirely and is
-   about five lines of code.
+`CaptureDelay.Enabled = true` makes the app fire the trigger **early** by that
+distance, so the shutter opens at the right *place* rather than the right
+*moment*. `false` disables the compensation entirely (fire exactly on the
+threshold) — useful for A/B testing whether it's helping, and for a first
+bring-up where you'd rather have one less moving part.
 
-### 2.3 Motion blur is the hard physical constraint
+The value is **signed**, so it covers both directions:
 
-`blur_px = speed × exposure × px_per_mm`, and a 100 mm FOV means a *high*
-px/mm — which is great for seeing small defects and brutal for blur:
+- **positive** (normal) — there is latency, fire early to compensate;
+- **negative** — a deliberate wait after the threshold, if it turns out the
+  operator presses the button slightly early or the fixture sits upstream.
 
-| Sensor width across 100 mm FOV | px/mm | 5 ms | 2 ms | 1 ms | 0.5 ms | 0.2 ms |
-|---|---:|---:|---:|---:|---:|---:|
-| 2048 px | 20.5 | 17.1 px | 6.8 px | 3.4 px | 1.7 px | 0.7 px |
-| 4096 px | 41.0 | 34.1 px | 13.7 px | 6.8 px | 3.4 px | 1.4 px |
+Measuring it is task **Y11**; I'll add the timing log that produces the number.
 
-So exposure needs to be roughly **0.2–1 ms**, which is a *lighting*
-requirement, not a software one. The good news: at 20–41 px/mm a 0.5 mm defect
-is still 10–20 px wide, so you can probably tolerate 3–4 px of blur — but you
-have to decide that deliberately, by looking at real images of a **moving**
-strip, not a stationary one (task Y2).
+### 3.4 Motion blur
 
-### 2.4 Image storage
+Not affected by any of the above corrections, and still worth checking on real
+moving images (Y2):
 
-125 segments per 10 m strip. At ~500 KB per PNG that is **60 MB per 10 m of
-strip**, every strip, into MongoDB. A shift's worth will be tens of GB.
+```
+   blur_px  =  speed_mm_per_s  ×  exposure_s  ×  px_per_mm
 
-Recommendation: store the full image **only for segments with a defect**; for
-good segments store the metadata and a small thumbnail. Decision needed
-(question Q6).
+   where    px_per_mm = image_width_px / Fov_along_travel_mm
+```
+
+A smaller FOV means more px/mm, which means more blur for the same exposure.
+Once you have the real FOV and sensor width, this is one multiplication — and
+it's a lighting requirement, not a software one.
 
 ---
 
-## 3. The flow
+## 4. The flow
 
 ### A. One strip, start to finish
 
@@ -120,32 +188,32 @@ good segments store the metadata and a small thumbnail. Decision needed
    │      - camera connected and streaming?                        │
    │      - PCB answering at http://<ip>/encoder ?                 │
    │      - Fov - Overlap > 0 ?                                    │
-   │      - Overlap >= worst-case position error ?                 │
+   │      - Overlap >= minimum safe overlap (3.1) ?                │
    │                                                               │
-   │    any check fails ───▶ REFUSE TO START, show which one       │
+   │    any check fails ───▶ REFUSE TO START, name the failure     │
    └───────────────────────────┬──────────────────────────────────┘
                                │ all pass
                                v
    ┌──────────────────────────────────────────────────────────────┐
    │ 3  STATE = ARMED                                             │
-   │    poll the PCB, watch for zeroCount to change               │
+   │    poll the PCB, watch for the press marker to change        │
    └───────────────────────────┬──────────────────────────────────┘
                                │
                                v
    ┌──────────────────────────────────────────────────────────────┐
    │ 4  OPERATOR PRESSES THE BUTTON                               │
-   │    (strip has just filled the FOV)                           │
-   │    PCB records zeroCounts and bumps zeroCount                │
-   │    app sees the change  ->  d = 0,  n = 1,  STATE = SCANNING │
+   │    (strip has just fully filled the FOV)                     │
+   │    app sees the marker change                                │
+   │       ->  d = 0,  n = 1,  STATE = SCANNING                   │
    └───────────────────────────┬──────────────────────────────────┘
                                │
                                v
    ┌──────────────────────────────────────────────────────────────┐
    │ 5  POLL LOOP   (~50 Hz, its own thread)                      │ <──┐
    │      GET http://<ip>/encoder                                 │    │
-   │      d = (counts - zeroCounts) x MmPerCount                  │    │
-   │      speed = change in d over recent samples                 │    │
-   │      d_now = d + speed x (age of this reading)               │    │
+   │      d      = distance since the press                       │    │
+   │      speed  = change in d over recent samples                │    │
+   │      d_now  = d + speed x (age of this reading)              │    │
    └───────────────────────────┬──────────────────────────────────┘    │
                                │                                       │
                                v                                       │
@@ -154,6 +222,8 @@ good segments store the metadata and a small thumbnail. Decision needed
                    ╲  (n-1) x Pitch ?        ╱ ──────────────────────── ┤
                     ╲──────────────────────╱                           │
                                │ yes                                   │
+                               │  (lead = speed x CaptureDelay.Ms,     │
+                               │   or 0 when CaptureDelay.Enabled=false)│
                                v                                       │
    ┌──────────────────────────────────────────────────────────────┐    │
    │ 6  PRODUCER: capture segment n                               │    │
@@ -184,10 +254,6 @@ good segments store the metadata and a small thumbnail. Decision needed
    └──────────────────────────────────────────────────────────────┘
 ```
 
-The loop `5 → 6 → 5` is the whole answer to "how do I capture the next part".
-**Nothing in it knows how fast the strip is moving** — that is the entire
-point of triggering on distance.
-
 ### B. Producer / consumer
 
 ```
@@ -210,7 +276,8 @@ point of triggering on distance.
                            CONSUMER (thread 2)         ┌─────────────┐
                            ┌──────────────────────┐    │ one frame   │
                            │ Inspect engine       │ ◀──│ at a time   │
-                           │ ColorDiff / PatchCore│    └─────────────┘
+                           │ PatchCore-R18        │    └─────────────┘
+                           │ (+ optional 2-stage) │
                            └──────────┬───────────┘
                                       │
                         ┌─────────────┴─────────────┐
@@ -222,29 +289,42 @@ point of triggering on distance.
                  └─────────────┘
 ```
 
-**Why the queue must exist:** the producer has ~480 ms between triggers. If it
-had to wait for inspection to finish, one slow PatchCore run would silently
-eat a trigger — and 80 mm of strip would go uninspected with nothing in the
-log to say so. The queue makes that failure *visible* (a logged drop) instead
-of *invisible*.
+**Why the queue must exist:** if the producer had to wait for inspection to
+finish, one slow run would silently eat a trigger — and a whole pitch of strip
+would go uninspected with nothing in the log to say so. The queue turns that
+failure from *invisible* into a *logged drop*.
 
-### C. What the frames actually cover
-
-`Fov = 100 mm`, `Overlap = 20 mm`, so `Pitch = 80 mm`:
+### C. Two-stage inspection (config toggle, off by default)
 
 ```
-            0         100       200       300       400  mm
-            ├─────────┼─────────┼─────────┼─────────┼──▶
-  frame 1   [========]                                     0 – 100
-  frame 2           [========]                            80 – 180
-  frame 3                   [========]                   160 – 260
-  frame 4                           [========]           240 – 340
-                    ├┤
-                    20 mm overlap at every seam, so a defect
-                    landing on a boundary is whole in one of
-                    the two frames, and no timing error can
-                    open an un-imaged gap
+                        ┌──────────────────────┐
+   frame from queue ───▶│ TwoStage.Enabled ?   │
+                        └───┬──────────────┬───┘
+                        no  │              │  yes
+                            v              v
+                 ┌────────────────┐   ┌──────────────────────┐
+                 │ PatchCore-R18  │   │ cheap screen first   │
+                 │ on every frame │   │ (ColorDiff)          │
+                 └────────┬───────┘   └──────┬───────────────┘
+                          │                  │
+                          │            ┌─────┴──────┐
+                          │       clean│            │suspicious
+                          │            v            v
+                          │      ┌──────────┐  ┌──────────────┐
+                          │      │ pass,    │  │ PatchCore-R18│
+                          │      │ no model │  │ confirms     │
+                          │      │ run      │  └──────┬───────┘
+                          │      └────┬─────┘         │
+                          └───────────┴───────────────┘
+                                      │
+                                      v
+                                 write report
 ```
+
+Worth turning on only if R18 can't hold the frame budget (§3.2). Most strip is
+good, so the cheap screen usually skips the model on the large majority of
+frames. The trade-off is that a defect the screen misses never reaches the
+model — so the screen must be tuned to over-trigger, not under-trigger.
 
 ### D. Why polls get interpolated
 
@@ -261,259 +341,417 @@ of *invisible*.
                                           -> error drops to well under 1 mm
 ```
 
-Same trick, applied again, covers the capture latency: fire the trigger early
-by `speed × CaptureLatencyMs`, so the shutter opens at the right *place*
-rather than the right *moment*.
-
 ---
 
-## 4. The PCB HTTP contract
+## 5. What the PCB must send — spec for your PCB programmer
 
-This is the part **you** (or whoever builds the PCB firmware) has to provide.
-Here is the contract I would like to code against.
+You said the JSON body might only carry distance. Here is what we want and
+what each field buys, in priority order. **Everything is one endpoint,
+`GET /encoder`, returning JSON.** Copy this section to them.
 
-### 4.1 Endpoint
+### 5.1 Tier 1 — required, we cannot work without these
 
-```
-GET http://<pcb-ip>/encoder        ->  200 OK, application/json
-```
+| Field | Type | Meaning |
+|---|---|---|
+| `mm` | float | **Absolute travel in millimetres** since power-up. Already scaled and correct — the app does no conversion. Never reset per read, never "distance since last request". |
+| `seq` | integer | Increments on every internal sample the PCB takes. |
+
+> **The PCB sends true millimetres.** Counts-to-millimetres scaling lives on
+> the PCB, so the app has no `MmPerCount` and does no arithmetic on the value.
+> The one consequence: the encoder scale is now *their* correctness problem,
+> and a wrong scale silently misplaces every defect position in the database
+> without anything looking broken. So it still gets verified once on the line
+> — task **Y4**, now a five-minute check rather than a calibration.
+
+**Why `seq` is not optional:** without it, a frozen feed and a stopped line
+look *identical* over HTTP — same number, poll after poll. One is fine, the
+other means we're flying blind and must abort the run. `seq` is the only thing
+that tells them apart. A monotonically increasing `uptimeMs` would do the same
+job if that's easier for them.
+
+### 5.2 Tier 2 — strongly wanted, saves real trouble
+
+| Field | Type | Meaning |
+|---|---|---|
+| `zeroCount` | integer | Increments by 1 on **every button press**. This is how we detect "a new strip just started". |
+| `zeroMm` | float | The value of `mm` **at the moment of that press**. |
+
+**Why not just have the button zero the distance?** Because we're polling at
+~50 Hz, we will routinely not be looking at the exact instant of the press. If
+the PCB silently resets to zero, a lost or late response is indistinguishable
+from a genuine zero, and the run starts some unknown distance off with nothing
+to flag it.
+
+With `zeroCount` + `zeroMm` we compute `d = mm − zeroMm` ourselves and get the
+**exactly right** answer even if we missed the press entirely, dropped twenty
+responses, or reconnected mid-strip. It costs the PCB two variables and
+removes a whole class of "the run started 40 mm off and nobody noticed" bugs.
+It is also the only subtraction the app does — there is no unit conversion
+anywhere in the path.
+
+### 5.3 Tier 3 — nice to have
+
+| Field | Type | Meaning |
+|---|---|---|
+| `button` | 0/1 | Current button state, for a UI indicator. |
+| `uptimeMs` | integer | PCB clock; lets us measure reading age and round-trip. |
+| `dir` | −1/+1 | Travel direction, if the encoder is quadrature. |
+
+### 5.4 Example response
 
 ```json
 {
-  "seq":        4821,
-  "uptimeMs":   128374,
-  "counts":     1043277,
-  "zeroCount":  7,
-  "zeroCounts": 1041200,
-  "button":     0
+  "seq":       4821,
+  "uptimeMs":  128374,
+  "mm":        52163.85,
+  "zeroCount": 7,
+  "zeroMm":    52080.10,
+  "button":    0,
+  "dir":       1
 }
 ```
 
-| Field | Meaning | Why it must be there |
-|---|---|---|
-| `seq` | increments every internal sample | Lets the PC detect a **frozen feed**. Without it, a stuck value is indistinguishable from a stopped line — a silent, dangerous failure. |
-| `uptimeMs` | PCB's own clock | Second staleness check, and lets the PC measure round-trip age. |
-| `counts` | **absolute** quadrature counts since power-up | Never a pre-zeroed distance — see §4.2. |
-| `zeroCount` | +1 on every button press | The PC watches this to detect "new strip started". |
-| `zeroCounts` | value of `counts` at the last press | The PC computes `d` itself; a missed poll can't lose the zero. |
-| `button` | current button state | Diagnostics / UI indicator. |
+### 5.5 Also please confirm with them
 
-### 4.2 Why absolute counts, and why the PCB remembers the zero
+1. **Confirm `mm` is true millimetres**, already scaled from counts-per-rev
+   and wheel circumference on their side. Tell them we do no conversion, so
+   the scale is theirs to get right — and that we will verify it once against
+   a 5 m tape run (Y4).
+2. **Range and wrap behaviour** — how large can `mm` grow before it wraps or
+   loses float precision, and what happens then. A `double` is fine for any
+   realistic run length; a 32-bit float starts losing sub-millimetre
+   resolution above ~30 m, which would quietly degrade defect positions.
+3. **Max sustainable poll rate** — can it serve 50 requests/sec? 20?
+4. **HTTP/1.1 with keep-alive**, so we're not opening a TCP connection per
+   poll.
+5. **Typical and worst-case response time.**
+6. **Static IP or DHCP reservation** — a changing IP breaks every run.
+7. Does the PCB **latch** the button press, or is it momentary? (Tier 2 makes
+   this a non-issue, which is the point.)
 
-The obvious design is "button press zeroes the counter, PC reads distance".
-**Don't do that with HTTP polling.** At 50 Hz you will regularly not be
-polling at the exact moment of the press, and if a response is lost you can
-never tell whether a small value means "just zeroed" or "reading is stale".
+### 5.6 If they can only send distance and nothing else
 
-With absolute counts plus a remembered `zeroCounts`, the PC computes
-`d = (counts − zeroCounts) × MmPerCount` and gets the **exactly correct**
-answer even if it missed the press entirely, reconnected mid-strip, or dropped
-twenty responses in a row. This one decision removes a whole category of
-"the run started 40 mm off and nobody noticed" bugs.
-
-### 4.3 Polling behaviour on the PC side
-
-- One dedicated poll thread, one reused `HttpClient` with keep-alive.
-- `PollHz` = 50 (configurable). Short timeout (~150 ms); a slow response must
-  never stall the loop.
-- Interpolate between polls (diagram D).
-- **Staleness guard:** if `seq` stops advancing, or no successful response for
-  `MaxStaleMs`, treat it as an encoder fault → **abort the run and alarm**.
-- **Never fall back to a timer.** A timer assumes constant speed, which is
-  exactly the assumption the encoder exists to remove; a silent fallback would
-  produce a clean-looking report for strip nobody actually measured.
-
-> **Better still, if the PCB team is willing:** let the PCB do the triggering.
-> Tell it the pitch, and have it fire a hardware trigger line into the camera
-> when it crosses each threshold. That removes HTTP latency, poll jitter and
-> lead compensation in one move. Worth asking (question Q4), but the polling
-> design above works without it.
-
----
-
-## 5. Producer / consumer detail
-
-### 5.1 Producer (one thread)
-
-Does exactly three things per trigger: capture, tag, enqueue. Nothing else —
-no inspection, no database, no UI. If it can't enqueue because the queue is
-full, it logs a dropped segment and marks the run incomplete, then carries on.
-
-Tagged with each frame: segment index, encoder `d` at capture, estimated
-speed, monotonic timestamp, and `TriggerErrorMm` (actual `d` minus the nominal
-threshold — a free quality signal; if it starts drifting, something is wrong).
-
-### 5.2 Consumer (one thread)
-
-Takes one frame at a time, runs the inspection engine, writes the report,
-raises an event for the UI. **One** consumer, not several: the PatchCore
-detector is shared state and I'd rather serialise access than assume the ONNX
-session is safe to call concurrently.
-
-### 5.3 If the consumer can't keep up with 480 ms
-
-Options, cheapest first — we pick once you've measured (task Y1):
-
-1. **Widen the pitch** — a smaller overlap or a larger FOV. Fewer frames/sec.
-2. **Two-stage inspection** — run cheap ColorDiff on every frame, and only run
-   PatchCore on frames that look suspicious. Usually the biggest win, since
-   most strip is good.
-3. **Parallel consumers** — needs one ONNX session per consumer (memory) and
-   careful ordering when writing results.
-4. **Smaller model / GPU** — PatchCore-R18 instead of R50, or CUDA execution.
-
-### 5.4 Memory
-
-A 4096×3000 BGR frame is ~36 MB. Queue of 6 ≈ 220 MB of `Mat` buffers held at
-once. Keep the bound small and dispose promptly. If frames are larger, lower
-the capacity.
+Then we need, at absolute minimum, `seq` added (§5.1). Without any way to
+detect a stale feed we'd have to treat the encoder as untrustworthy, and the
+honest response to an untrustworthy encoder is to refuse to run — a silent
+fallback to a timer would produce clean-looking reports for strip nobody
+actually measured. It's a small firmware change; worth pushing for.
 
 ---
 
 ## 6. Config file
 
-Everything that can change on the line goes in `config.json`, alongside the
-existing settings ([PipelineConfig.cs](../PipelineConfig.cs)):
+All of this goes in `config.json` next to the existing settings
+([PipelineConfig.cs](../PipelineConfig.cs)), re-read at the start of each run.
 
 ```json
 "Scan": {
   "Encoder": {
-    "BaseUrl":     "http://192.168.1.50",
-    "Path":        "/encoder",
-    "PollHz":      50,
-    "TimeoutMs":   150,
-    "MaxStaleMs":  300,
-    "MmPerCount":  0.05
+    "BaseUrl":    "http://192.168.1.50",
+    "Path":       "/encoder",
+    "PollHz":     50,
+    "TimeoutMs":  150,
+    "MaxStaleMs": 300
   },
+
+  "CaptureDelay": {
+    "Enabled": true,
+    "Ms":      80.0
+  },
+
   "Geometry": {
-    "FovAlongTravelMm":     100.0,
-    "OverlapMm":             20.0,
-    "FirstTriggerOffsetMm":   0.0,
-    "TravelAxis":            "X",
-    "TravelReversed":        false,
-    "PxPerMmAlong":          41.0,
-    "PxPerMmAcross":         41.0
+    "FovAlongTravelMm":     0.0,
+    "OverlapMm":           25.0,
+    "FirstTriggerOffsetMm": 0.0,
+    "TravelAxis":           "X",
+    "TravelReversed":       false,
+    "PxPerMmAlong":         0.0,
+    "PxPerMmAcross":        0.0
   },
-  "Timing": {
-    "CaptureLatencyMs":    80.0,
-    "LeadCompensation":    true,
-    "MaxLineSpeedMmPerSec": 170.0
+
+  "Inspection": {
+    "Method": "PatchCore-R18",
+    "TwoStage": {
+      "Enabled":      false,
+      "ScreenMethod": "ColorDiff"
+    }
   },
+
   "Run": {
-    "QueueCapacity":       6,
-    "IdleTimeoutSec":     20.0,
-    "StripLengthMm":         0,
+    "QueueCapacity":        6,
+    "IdleTimeoutSec":      20.0,
+    "StripLengthMm":          0,
+    "MaxLineSpeedMmPerSec": 170.0,
     "StoreImagesFor":  "defects-only"
   },
+
   "Simulate": {
-    "Enabled":              false,
-    "SpeedMmPerSec":        166.7
+    "Enabled":       false,
+    "SpeedMmPerSec": 166.7
   }
 }
 ```
 
-Two deliberate choices:
+Notes on three of these:
 
-- **`Pitch` is not in the file.** It's derived as `Fov − Overlap`. Storing both
-  a pitch and the values it comes from invites them to disagree, and a
-  disagreement here means silent gaps.
-- **"Read it every time" = re-read at ARM**, not on every encoder sample. A
-  file read at 50 Hz would be terrible, and worse, a config change *mid-strip*
-  would mean segment 60 used a different pitch from segment 1 — the coverage
-  map would be quietly wrong. Re-reading at the start of each run gives you
-  exactly what you want ("edit the file, next strip uses it") with no restart
-  and no mid-run corruption. The UI will show the values in force for the
-  current run, plus a **Reload Config** button.
+- **`FovAlongTravelMm: 0.0`** is a deliberate "not measured yet". Pre-flight
+  refuses to start at 0 rather than guessing — task Y3 fills it in.
+- **`CaptureDelay.Enabled: false`** turns off lead compensation entirely.
+  Remember from §3.1 that this costs about 10 mm of required overlap; the
+  pre-flight check accounts for the setting automatically and will tell you if
+  your overlap is now too small.
+- **"Read every time" = re-read at ARM**, not per encoder sample. A file read
+  at 50 Hz would be wasteful, and worse, a config change *mid-strip* would
+  mean segment 60 used a different pitch from segment 1 — the coverage map
+  would be quietly wrong. Re-reading at the start of each run gives exactly
+  what you want (edit the file, next strip uses it, no restart) with no
+  mid-run corruption. The UI shows the values in force for the current run,
+  plus a **Reload Config** button.
 
 ---
 
-## 7. Who does what
+## 7. What gets stored in the database
 
-### 7.1 Your tasks — physical, hardware, and decisions I can't make
+The point of the encoder is not just to time the captures — it is so that
+**every defect can be reported as a position on the strip**. Your example
+("a defect from 5 cm to 10 cm") becomes `startMm: 50.0, endMm: 100.0`.
 
-| # | Task | Why it's yours | Blocks |
+### 7.1 Units: millimetres everywhere
+
+One canonical unit in the database, always `double` millimetres. Centimetres
+and metres are a *display* choice in the UI. Mixing units in stored data is
+the classic way to end up with a defect reported at 5 mm that was really at
+5 cm, so there is exactly one unit and no conversions anywhere in the path —
+including from the PCB, which now sends true millimetres already (§5.1).
+
+### 7.2 Three levels of record
+
+```
+   StripRun                       one document per strip
+   ├── batchId, start/end time, total length
+   ├── coverageComplete
+   └── defects[]  <-- MERGED, deduped across overlaps: the authoritative
+                      "where are the defects on this strip" answer
+       │
+       ├── DefectReport (segment 1)     one document per captured frame
+       │   ├── segmentIndex, segmentStartMm, segmentEndMm
+       │   ├── encoderMmAtCapture, triggerErrorMm, lineSpeedMmPerSec
+       │   └── defects[]  <-- RAW, exactly as seen in this one frame
+       │
+       ├── DefectReport (segment 2)
+       └── ...
+```
+
+**Why both raw and merged.** A defect sitting in an overlap band is genuinely
+visible in two frames, so the per-frame records will legitimately list it
+twice — that is correct and worth keeping for traceability back to an image.
+But it must be *one* defect when the operator asks "what's wrong with this
+strip". So the per-segment lists stay raw, and the `StripRun` list is merged
+and deduped (task C11). Keep the raw ones; don't overwrite them.
+
+### 7.3 The defect record
+
+```csharp
+public sealed class DefectBox
+{
+    // ── position along the strip: this is the "5 cm to 10 cm" ──
+    [BsonElement("startMm")]  public double StartMm  { get; set; }
+    [BsonElement("endMm")]    public double EndMm    { get; set; }
+
+    // ── position across the strip width: which side is it on ──
+    [BsonElement("acrossStartMm")] public double AcrossStartMm { get; set; }
+    [BsonElement("acrossEndMm")]   public double AcrossEndMm   { get; set; }
+
+    [BsonElement("areaMm2")]  public double AreaMm2 { get; set; }
+    [BsonElement("score")]    public double Score   { get; set; }  // PatchCore anomaly score
+
+    // ── raw pixel box, kept so a position can always be traced to an image ──
+    [BsonElement("px")] public int PxX { get; set; }
+    [BsonElement("py")] public int PxY { get; set; }
+    [BsonElement("pw")] public int PxW { get; set; }
+    [BsonElement("ph")] public int PxH { get; set; }
+}
+```
+
+On the merged `StripRun.defects[]` entries, two more fields record where the
+merged defect came from:
+
+```csharp
+[BsonElement("segments")]    public List<int> SourceSegments { get; set; } = new();
+[BsonElement("mergedCount")] public int       MergedCount    { get; set; }
+```
+
+### 7.4 How the millimetres are computed
+
+```
+   StartMm = SegmentStartMm + ( PxX          / PxPerMmAlong )
+   EndMm   = SegmentStartMm + ( (PxX + PxW)  / PxPerMmAlong )
+```
+
+and when `TravelReversed` is true, the pixel axis runs the other way:
+
+```
+   StartMm = SegmentStartMm + ( (ImageWidth − PxX − PxW) / PxPerMmAlong )
+   EndMm   = SegmentStartMm + ( (ImageWidth − PxX)       / PxPerMmAlong )
+```
+
+`SegmentStartMm` is `(n−1) × Pitch` — the frame's own place on the strip, so a
+defect's position is always absolute strip position, never "position within
+frame 7".
+
+`TravelAxis` and `TravelReversed` (§6) depend on how the camera is physically
+bolted on. Getting them wrong reports every defect mirrored, which is worse
+than reporting no position at all — so this gets verified once with a
+deliberate mark on a test strip, as part of Y3.
+
+### 7.5 Worked example
+
+Camera FOV 100 mm, `Pitch` 80 mm, `PxPerMmAlong` 41. A defect found in
+**segment 2** at pixel x = 410, width = 410:
+
+```
+   SegmentStartMm = (2 − 1) × 80          =  80.0 mm
+   StartMm        = 80 + (410 / 41)       =  90.0 mm
+   EndMm          = 80 + (820 / 41)       = 100.0 mm
+```
+
+→ stored as `startMm: 90.0, endMm: 100.0`, i.e. a defect from 9 cm to 10 cm
+along the strip.
+
+### 7.6 Indexes and the queries this enables
+
+```
+   reports:     { stripRunId: 1, segmentIndex: 1 }
+   reports:     { "defects.startMm": 1 }
+   strip_runs:  { batchId: 1, startedUtc: -1 }
+   strip_runs:  { coverageComplete: 1 }
+```
+
+Which makes these one-liners:
+
+- every defect on strip X, in order along the strip;
+- all defects between 2000 mm and 3000 mm;
+- all strips this shift whose coverage was incomplete;
+- defect density per metre, for a trend chart.
+
+That last one is only possible because position is stored per defect rather
+than per frame — worth having even though nobody asks for it on day one.
+
+---
+
+## 8. Who does what
+
+### 8.1 Your tasks
+
+| # | Task | Why it's yours | Unblocks |
 |---|---|---|---|
-| **Y1** | **Time one detection run** in the current app (ColorDiff and PatchCore-R50/R18). Just note the wall-clock seconds. | Decides whether one consumer can keep up with 480 ms, and therefore the whole consumer design (§5.3). | §5.3 choice |
-| **Y2** | Capture a few frames of a **moving** strip at production speed and look at the blur. | Blur is physical; only real images settle it (§2.3). | Lens/lighting/exposure |
-| **Y3** | Measure the FOV along travel with a tape; mark both FOV edges on the guide rail. | Physical measurement. The rail marks make the button press repeatable instead of a judgement call. | `FovAlongTravelMm` |
-| **Y4** | Calibrate `MmPerCount`: mark the strip, run **5 m or more**, record counts, divide. Repeat 3×. | Needs the line. Long run because error divides by distance. | `MmPerCount` |
-| **Y5** | Get the PCB's **IP address**, and have it made static / DHCP-reserved. | Network admin. A changing IP breaks every run. | `BaseUrl` |
-| **Y6** | Give the PCB team the §4.1 contract and confirm they can serve it (especially `seq`, `zeroCount`, `zeroCounts`). | Their firmware. I can't write to your PCB. | Everything encoder-side |
-| **Y7** | Confirm camera **model, resolution, global vs rolling shutter, max fps, hardware trigger input?** | Spec sheet / physical. Rolling shutter would skew a moving image and break the geometry. | §2.3, Q4 |
-| **Y8** | Decide the **smallest defect that must be caught** (mm). | Product decision. Drives px/mm, blur budget and overlap. | Overlap sizing |
-| **Y9** | Answer the open questions in §9. | Design decisions. | Phase 1 |
+| **Y1** | **Time one PatchCore-R18 detection run** in the app as it is today. Just wall-clock seconds. | Decides whether one consumer holds the frame budget, and therefore whether `TwoStage` ships on or off. | §3.2 comparison |
+| **Y2** | Capture frames of a **moving** strip at production speed; look at the blur. | Physical; only real images settle it. | Lens / lighting / exposure |
+| **Y3** | **Measure the FOV along travel** with a tape. Mark both FOV edges on the guide rail. | Physical measurement. The rail marks make the button press repeatable instead of a judgement call. | `FovAlongTravelMm`, all of §3 |
+| **Y4** | **Verify the PCB's millimetres are true millimetres**: mark the strip, run a tape-measured **5 m or more**, check the app's reading matches. Repeat 3×. | The PCB now does the scaling, so this is a check not a calibration — but a wrong scale there silently misplaces every defect position in the database. | Trustworthy defect positions |
+| **Y5** | Get the PCB's **IP address**, made static or DHCP-reserved. | Network admin. | `BaseUrl` |
+| **Y6** | **Send §5 to the PCB programmer**; get Tier 1 + Tier 2 confirmed. | Their firmware. | Everything encoder-side |
+| **Y7** | Confirm camera **model, resolution, global vs rolling shutter, max fps, hardware trigger input?** | Spec sheet. Rolling shutter would skew a moving image and break the geometry. | §3.4 |
+| **Y8** | Decide the **smallest defect that must be caught** and the **largest expected defect length** (mm). | Product decision. Drives px/mm and overlap. | `OverlapMm` |
+| **Y9** | Answer §10. | Design decisions. | Phase 1 onward |
 | **Y10** | Bench test with the simulator, then the first real strip. | Needs the line. | Go-live |
+| **Y11** | Once C4 lands: read the timing log, put the number in `CaptureDelay.Ms`. | Needs the real PCB and camera. | Trigger accuracy |
 
-### 7.2 My tasks — all the code
+### 8.2 My tasks
 
-| # | Task | Depends on | Testable without hardware? |
+| # | Task | Depends on | Needs hardware? |
 |---|---|---|---|
-| **C1** | `ScanConfig` schema + loader + validation, wired into `config.json`, re-read at ARM | — | Yes |
-| **C2** | Trigger math + `ScanController` state machine (ARMED → SCANNING → FINALISING), latch and no-burst guards | C1 | Yes — unit tests |
-| **C3** | `IEncoderSource` interface + **`SimulatedEncoderSource`** (software ramp + on-screen zero button) | C1 | Yes |
-| **C4** | `HttpEncoderSource`: poll loop, interpolation, staleness guard, fault handling | C3, Y5, Y6 | Partly — I can test against a fake local endpoint |
-| **C5** | Producer/consumer: bounded queue, capture thread, consumer thread, drop accounting | C2 | Yes |
-| **C6** | Extract the UI-free `Inspect` engine out of `RunDetectionPipelineAsync` ([MainWindow.xaml.cs:664](../MainWindow.xaml.cs#L664)) so manual and scanned runs share one code path | — | Yes |
-| **C7** | `StripRun` model + extended `DefectReport` (segment index, start/end mm, trigger error, speed) + Mongo writes | C6 | Yes |
-| **C8** | Strip Scan UI panel: encoder status, live position/speed, ARM / End Strip, segment counter, Reload Config | C2, C3 | Yes |
-| **C9** | Strip map: one tick per segment, green/red/grey, click a tick to open that image | C7, C8 | Yes |
-| **C10** | Defect pixel → strip-coordinate mapping, and overlap dedupe across adjacent segments | C7, Y3 | Yes |
-| **C11** | Diagnostics: trigger error log, dropped-segment counter, coverage-complete flag | C5, C7 | Yes |
-| **C12** | Reference PCB firmware sketch implementing §4.1, if useful to your PCB team | Y6 | N/A |
+| **C1** | `ScanConfig` schema + loader + `Validate()`, wired into `config.json`, re-read at ARM | — | No |
+| **C2** | `ScanGeometry` (pitch, thresholds, segment ranges, minimum-safe-overlap) + `ScanController` state machine with latch and no-burst guards | C1 | No |
+| **C3** | `IEncoderSource` + **`SimulatedEncoderSource`** (software ramp + on-screen zero button) | C1 | No |
+| **C4** | `HttpEncoderSource`: poll loop, interpolation, staleness guard, fault handling, timing log for Y11 | C3, Y5, Y6 | Partly — testable against a fake local endpoint |
+| **C5** | Producer/consumer: bounded queue, capture thread, consumer thread, drop accounting | C2 | No |
+| **C6** | Extract the UI-free `Inspect` engine out of `RunDetectionPipelineAsync` ([MainWindow.xaml.cs:664](../MainWindow.xaml.cs#L664)) so manual and scanned runs share one code path | — | No |
+| **C7** | Two-stage inspection path behind the config toggle | C6 | No |
+| **C8** | `StripRun` + `DefectBox` + extended `DefectReport` exactly as §7, Mongo writes and indexes | C6 | No |
+| **C9** | Strip Scan UI panel: encoder status, live position/speed, ARM / End Strip, segment counter, Reload Config | C2, C3 | No |
+| **C10** | Strip map: one tick per segment, green/red/grey, click to open that image | C8, C9 | No |
+| **C11** | Pixel → millimetre mapping (§7.4) + overlap dedupe into the merged `StripRun.defects[]` (§7.2) | C8, Y3 | No |
+| **C12** | Diagnostics: trigger-error log, dropped-segment counter, coverage-complete flag | C5, C8 | No |
 
-**C1–C3, C5–C9 need no encoder and no line** — the simulator stands in, so
-most of the build can happen at a desk before the hardware is ready.
-
-### 7.3 Suggested order
-
-```
-   Y1 ──▶ decides §5.3          (do this first, it's 10 minutes)
-   Y3, Y5, Y7 ──▶ C1
-                   │
-                   ├──▶ C2 ──▶ C3 ──▶ C5 ──▶ C8      <- all desk work,
-                   │                    │              simulator only
-                   └──▶ C6 ──────────▶ C7 ──▶ C9
-                                        │
-   Y6 ──▶ C4 ──────────────────────────┤
-   Y4 ────────────────────────────────▶ C10, C11 ──▶ Y10 first strip
-```
+Everything except C4 can be built and tested at a desk with the simulator.
 
 ---
 
-## 8. Build phases
+## 9. Phases
 
 | Phase | Contains | Done when |
 |---|---|---|
-| **0** | C1 + C2 | Trigger math passes unit tests: variable speed, stop, reverse, jump-past-threshold |
-| **1** | C3 + C5 | Simulator drives a full fake run, queue fills and drains, drops are logged |
-| **2** | C6 | Manual Run Detection produces byte-identical results to today |
-| **3** | C7 + C8 | A simulated run writes a complete `StripRun` with per-segment reports |
-| **4** | C9 + C10 | Strip map shows defect positions in millimetres, clickable |
+| **0** ← next | C1 + C2 | Trigger math passes tests: variable speed, stop, reverse, jump-past-threshold |
+| **1** | C3 + C5 | Simulator drives a full fake run; queue fills and drains; drops get logged |
+| **2** | C6 + C7 | Manual Run Detection behaves identically to today; two-stage toggle works |
+| **3** | C8 + C9 | A simulated run writes a complete `StripRun` with per-segment reports |
+| **4** | C10 + C11 | Strip map shows defect positions in millimetres, clickable |
 | **5** | C4 | Real PCB drives a real run |
-| **6** | C11 + Y4 calibration | Trigger error measured and stable; first production strip |
+| **6** | C12 + Y4 | Trigger error measured and stable; first production strip |
+
+### 9.1 Phase 0 in detail — what I'd write next
+
+Purely additive; nothing existing changes behaviour.
+
+1. **`Scan/ScanConfig.cs`** — the nested settings classes from §6, with
+   defaults, hanging off `PipelineConfig` as a `Scan` property so it lands in
+   the existing `config.json`.
+2. **`Scan/ScanConfig.Validate()`** — returns a list of human-readable
+   problems: FOV unset, `Fov − Overlap <= 0`, overlap below the §3.1 minimum
+   *for the current `CaptureDelay.Enabled` setting*, bad URL, `PxPerMm` unset
+   (defect positions would be meaningless without it).
+   This is what the pre-flight in step 2 of diagram A calls.
+3. **`Scan/ScanGeometry.cs`** — pure functions, no state: `Pitch`,
+   `ThresholdFor(n)`, `SegmentRange(n)`, `SegmentCountFor(lengthMm)`,
+   `MinimumSafeOverlap(speed, pollHz, delayMs, delayEnabled)`.
+4. **`Scan/ScanController.cs`** — the state machine (IDLE → ARMED → SCANNING →
+   FINALISING), `OnSample()` returning "capture segment n" or nothing, with
+   the latch (never re-fire an index) and the no-burst rule (if `d` jumped past
+   several thresholds, fire once for where we actually are and log the skipped
+   indices as gaps).
+5. **Tests** for 3 and 4 — see the question below.
+
+**One decision I need from you before starting:** there's no test project in
+the solution today. The trigger math is exactly the kind of thing that should
+have tests — the stop / reverse / jump-past-threshold cases are easy to get
+subtly wrong and painful to debug on a live line. Options:
+
+- **(a)** add a small `copperInspection.Tests` xUnit project to the solution —
+  ~15 minutes, and gives us a permanent safety net; **my recommendation**
+- **(b)** keep the math in a plain static class and I verify it with a
+  throwaway console harness, leaving no test project behind.
+
+### 9.2 What you can do while I write Phase 0
+
+None of these depend on my code, and three of them feed straight into it:
+
+1. **Y1** — time a PatchCore-R18 run. ~10 minutes, and it's the input to the
+   `TwoStage` default.
+2. **Y3** — measure the FOV. This is the single number the whole of §3 hangs
+   on, and it's currently a guess.
+3. **Y6** — send §5 to the PCB programmer. Longest lead time of anything here,
+   so starting it today is worth more than it looks.
+4. **Y5** — get the PCB IP pinned.
+5. **Q1 and Q3** in §10 — two short answers.
 
 ---
 
-## 9. Open questions
+## 10. Open questions
 
 | # | Question | Why it matters |
 |---|---|---|
-| **Q1** | **"Max 10/min" — 10 metres per minute, or 10 strips per minute?** All of §2 assumes 10 m/min. | If it's strips, and a strip is 20 m, that's 200 m/min = 3333 mm/s — **20× faster**. At 100 mm FOV that's 42 frames/sec and every number in §2 fails. This changes the answer from "area camera" to "line-scan camera". **Most important question here.** |
-| **Q2** | Is the FOV really ~10 cm, or was that just an example? | 100 mm vs 1000 mm is a 10× difference in frame rate, storage and blur. |
-| **Q3** | How does the operator signal **end of strip**? Button, known length, sensor, or just stop? | Determines when a run finalises and coverage is judged. |
-| **Q4** | Can the PCB drive a **hardware trigger** into the camera, and does the camera have a trigger input? | Would eliminate HTTP latency and poll jitter entirely (§4.3). |
-| **Q5** | Does one frame cover the **full strip width**? | If not, this becomes 2-D tiling and needs a second axis or second camera. |
-| **Q6** | Store images for **every** segment, or only defective ones? | 125 segments per 10 m ≈ 60 MB/strip if you keep them all (§2.4). |
-| **Q7** | Is the strip **laterally guided**, or does it wander side to side? | Wander breaks pixel-exact reference diff; PatchCore tolerates it better. |
-
-**Q1 and Q2 gate everything else** — if the speed or the FOV is very different
-from what I've assumed, the throughput section needs redoing before any code
-gets written.
+| **Q1** | **"Max 10/min" — 10 metres per minute, or 10 strips per minute?** Every number in §3 assumes 10 m/min = 166.7 mm/s. | If it's strips, and a strip is 20 m, that's 200 m/min — **20× faster**, and every row of §3.2 changes. Would likely push this from an area camera to a line-scan camera. **Still the most important open question.** |
+| **Q2** | What is the **real FOV**? (= task Y3) | Sets pitch, frame rate, storage and blur all at once. |
+| **Q3** | How does the operator signal **end of strip** — button, known length, sensor, or just stop? | Determines when a run finalises and coverage is judged. |
+| **Q4** | Can the PCB drive a **hardware trigger** into the camera, and does the camera have a trigger input? | Would remove HTTP latency and poll jitter entirely, and make `CaptureDelay` unnecessary. |
+| **Q5** | Does one frame cover the **full strip width**? | If not, this becomes 2-D tiling and needs a second axis or a second camera. |
+| **Q6** | Store images for **every** segment, or only defective ones? | At a small FOV this is tens of GB per shift. Default in §6 is `defects-only`. |
+| **Q7** | Is the strip **laterally guided**, or does it wander? | Wander breaks pixel-exact reference diff; PatchCore tolerates it better. |
 
 ---
 
-## 10. Status
+## 11. Status
 
-Nothing implemented. Say the word and I'll start at **C1** (config schema and
-trigger math), which is self-contained, needs no hardware, and gives you
-something you can unit-test the same day.
+Nothing implemented. Waiting on your go-ahead for **Phase 0 (C1 + C2)** and on
+the test-project choice in §9.1.

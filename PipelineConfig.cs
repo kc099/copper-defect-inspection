@@ -54,6 +54,14 @@ namespace copperInspection
         public int ColorDiffMorphKernel { get; set; } = 5;
         public string ReferenceColorPath { get; set; } = "Assets/reference_color.json";
 
+        // ── Continuous strip scan ────────────────────────────────────────────
+        /// <summary>Encoder-triggered strip scanning: PCB address, field of
+        /// view, overlap, capture delay. Re-read at the start of every run so
+        /// production can retune without a restart - never mid-run, which
+        /// would leave one strip's segments measured two different ways.
+        /// See docs/STRIP_SCAN_BUILD_PLAN.md.</summary>
+        public Scan.ScanConfig Scan { get; set; } = new();
+
         // ── Session ──────────────────────────────────────────────────────────
         public string? LastFolder { get; set; }
     }

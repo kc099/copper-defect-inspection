@@ -1,4 +1,4 @@
-using MongoDB.Bson;
+﻿using MongoDB.Bson;
 using MongoDB.Bson.Serialization.Attributes;
 using MongoDB.Driver;
 using System;
@@ -43,10 +43,63 @@ namespace copperInspection
         [BsonElement("resultImageBase64")]
         public string ResultImageBase64 { get; set; } = string.Empty;
 
+        // ══ Continuous strip scan ══
+        // Set only for reports produced by a strip run; a manually captured
+        // frame leaves them at their defaults. Together they answer "which
+        // part of which strip is this?" - see docs/STRIP_SCAN_BUILD_PLAN.md.
+
+        /// <summary>The run this segment belongs to, or empty for a manual capture.</summary>
+        [BsonElement("stripRunId")]
+        public ObjectId StripRunId { get; set; }
+
+        /// <summary>1-based position of this frame within the run.</summary>
+        [BsonElement("segmentIndex")]
+        public int SegmentIndex { get; set; }
+
+        /// <summary>The stretch of strip this frame covers, mm from the leading edge.</summary>
+        [BsonElement("segmentStartMm")] public double SegmentStartMm { get; set; }
+        [BsonElement("segmentEndMm")] public double SegmentEndMm { get; set; }
+
+        /// <summary>Encoder reading at the moment of capture.</summary>
+        [BsonElement("encoderMmAtCapture")] public double EncoderMmAtCapture { get; set; }
+
+        /// <summary>Actual minus ideal trigger position. Watch it for drift.</summary>
+        [BsonElement("triggerErrorMm")] public double TriggerErrorMm { get; set; }
+
+        [BsonElement("lineSpeedMmPerSec")] public double LineSpeedMmPerSec { get; set; }
+
+        /// <summary>Defects as seen in THIS frame, raw and un-deduplicated. A
+        /// defect in a seam legitimately appears here and in the neighbouring
+        /// segment too; the run's merged list is the deduplicated one.</summary>
+        [BsonElement("defects")]
+        public List<Scan.DefectBox> Defects { get; set; } = new();
+
         /// <summary>Row label shown in the reports list (local time + defect count).</summary>
         [BsonIgnore]
         public string DisplayText =>
             $"{Timestamp.ToLocalTime():yyyy-MM-dd  HH:mm:ss}   ·   {DefectCount} defect{(DefectCount == 1 ? "" : "s")}";
+
+        /// <summary>
+        /// Where the defect(s) are, in millimetres along the strip - only
+        /// populated for reports a strip scan produced (see
+        /// Scan.StripRunRecorder); a manually captured report has no position
+        /// data, so this is empty for those, not a placeholder.
+        /// </summary>
+        [BsonIgnore]
+        public string PositionsText
+        {
+            get
+            {
+                if (Defects.Count == 0) return "";
+                const int shown = 3;
+                var parts = new List<string>(shown);
+                foreach (Scan.DefectBox d in Defects.GetRange(0, Math.Min(shown, Defects.Count)))
+                    parts.Add($"{d.StartMm:F0}–{d.EndMm:F0}mm");
+                string text = "📍 " + string.Join(",  ", parts);
+                if (Defects.Count > shown) text += $"  +{Defects.Count - shown} more";
+                return text;
+            }
+        }
 
         /// <summary>
         /// True for an empty frame that pads the live gallery out to its fixed slot
@@ -67,7 +120,10 @@ namespace copperInspection
         private const string DatabaseName     = "defect_detection_db";
         private const string CollectionName   = "reports";
 
-        private static IMongoCollection<DefectReport> Collection()
+        /// <summary>Internal to the app: StripRunStore queries and indexes the
+        /// same collection, and one definition of where it lives is better than
+        /// two that can drift.</summary>
+        internal static IMongoCollection<DefectReport> Collection()
         {
             var client = new MongoClient(ConnectionString);
             var db     = client.GetDatabase(DatabaseName);

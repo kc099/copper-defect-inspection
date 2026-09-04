@@ -65,6 +65,7 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
                     <Border Grid.Row="0" Background="#000000" CornerRadius="5" MinHeight="80">
@@ -85,10 +86,18 @@
                                Margin="2,8,0,0"/>
                     <TextBlock x:Name="CardTime" Grid.Row="2" Text="{Binding DisplayText}"
                                Foreground="#9090B8" FontSize="11" Margin="2,3,0,0"/>
-                    <TextBlock x:Name="CardMethod" Grid.Row="3" Text="{Binding Method}"
+
+                    <!-- Where on the strip it happened - only strip-scan reports
+                         have this; a manually captured report leaves it blank
+                         and this row just takes no visible space. -->
+                    <TextBlock x:Name="CardPositions" Grid.Row="3" Text="{Binding PositionsText}"
+                               Foreground="#F0B33C" FontSize="10" FontWeight="SemiBold"
+                               Margin="2,3,0,0" TextWrapping="Wrap"/>
+
+                    <TextBlock x:Name="CardMethod" Grid.Row="4" Text="{Binding Method}"
                                Foreground="#5C5C8C" FontSize="10" Margin="2,2,0,0"/>
 
-                    <StackPanel x:Name="CardActions" Grid.Row="4" Orientation="Horizontal" Margin="0,8,0,0">
+                    <StackPanel x:Name="CardActions" Grid.Row="5" Orientation="Horizontal" Margin="0,8,0,0">
                         <Button Content="🔎  View" Style="{StaticResource CardBtn}"
                                 Click="CardView_Click" Margin="0,0,6,0"/>
                         <Button Content="⬇  Download" Style="{StaticResource CardBtn}"
@@ -103,6 +112,7 @@
                     <Setter TargetName="CardBody"      Property="Opacity"    Value="0.35"/>
                     <Setter TargetName="CardCount"     Property="Visibility" Value="Collapsed"/>
                     <Setter TargetName="CardTime"      Property="Visibility" Value="Collapsed"/>
+                    <Setter TargetName="CardPositions" Property="Visibility" Value="Collapsed"/>
                     <Setter TargetName="CardMethod"    Property="Visibility" Value="Collapsed"/>
                     <Setter TargetName="CardActions"   Property="Visibility" Value="Collapsed"/>
                     <Setter TargetName="CardEmptyNote" Property="Visibility" Value="Visible"/>

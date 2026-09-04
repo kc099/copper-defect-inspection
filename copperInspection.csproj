@@ -11,8 +11,12 @@
          without this, the default **/*.cs glob below would compile its
          Program.cs (which references neoAPI) straight into this assembly,
          silently undoing the whole point of running the camera in a
-         separate process. -->
-    <DefaultItemExcludes>$(DefaultItemExcludes);CameraBridge/**</DefaultItemExcludes>
+         separate process.
+
+         Tests\ is nested the same way and needs the same treatment: without
+         it, this project picks up the test project's generated obj\**
+         AssemblyInfo.cs and fails to build with duplicate-attribute errors. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);CameraBridge/**;Tests/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>

@@ -1,4 +1,4 @@
-<Window x:Class="copperInspection.MainWindow"
+﻿<Window x:Class="copperInspection.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:copperInspection"
@@ -202,6 +202,8 @@
                               Foreground="#E8E8F8" Background="Transparent">
                         <MenuItem Header="📊  Reports" Foreground="#111827"
                                   Click="ReportsMenuItem_Click"/>
+                        <MenuItem Header="🧾  Strip Runs" Foreground="#111827"
+                                  Click="StripRunsMenuItem_Click"/>
                     </MenuItem>
                 </Menu>
 
