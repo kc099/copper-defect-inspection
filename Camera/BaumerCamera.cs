@@ -40,6 +40,13 @@ namespace copperInspection.Camera
     ///   frame, since that one actually feeds detection.</summary>
     public sealed class BaumerCamera : IDisposable
     {
+        /// <summary>Which CameraBridge.exe instance this talks to - "A", "B",
+        /// etc. Each channel is a fully separate process with its own pipes,
+        /// so N physical cameras just mean N BaumerCamera instances with
+        /// distinct channels, never one process juggling multiple Cam
+        /// objects.</summary>
+        private readonly string _channel;
+
         private Process? _bridgeProcess;
         private NamedPipeClientStream? _controlPipe;
         private NamedPipeClientStream? _previewPipe;
@@ -48,6 +55,11 @@ namespace copperInspection.Camera
         private readonly object _previewLock = new();
         private Mat? _latestPreviewFrame;
         private readonly object _controlLock = new();
+
+        public BaumerCamera(string channel = "A")
+        {
+            _channel = channel;
+        }
 
         public bool IsConnected { get; private set; }
         public bool IsStreaming { get; private set; }
@@ -79,6 +91,7 @@ namespace copperInspection.Camera
                     var psi = new ProcessStartInfo
                     {
                         FileName = exePath,
+                        Arguments = _channel,
                         UseShellExecute = false,
                         CreateNoWindow = true,
                         RedirectStandardOutput = true,
@@ -95,10 +108,10 @@ namespace copperInspection.Camera
                     _bridgeProcess.BeginErrorReadLine();
                 }
 
-                _controlPipe = new NamedPipeClientStream(".", PipeNames.Control, PipeDirection.InOut);
+                _controlPipe = new NamedPipeClientStream(".", PipeNames.Control(_channel), PipeDirection.InOut);
                 _controlPipe.Connect(5000);
 
-                _previewPipe = new NamedPipeClientStream(".", PipeNames.Preview, PipeDirection.In);
+                _previewPipe = new NamedPipeClientStream(".", PipeNames.Preview(_channel), PipeDirection.In);
                 _previewPipe.Connect(5000);
 
                 _previewReaderRunning = true;

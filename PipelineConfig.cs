@@ -54,6 +54,28 @@ namespace copperInspection
         public int ColorDiffMorphKernel { get; set; } = 5;
         public string ReferenceColorPath { get; set; } = "Assets/reference_color.json";
 
+        // ── Live-camera ROI ──────────────────────────────────────────────────
+        /// <summary>The region of a LIVE camera frame that actually gets
+        /// inspected, in normalized 0-1 coordinates so it survives any
+        /// resolution or display-size change.
+        ///
+        /// Why this exists: the PatchCore models were trained on manually
+        /// cropped stills (same 1536 height as the camera, but tighter in
+        /// width - 1215/1095/1166 px depending on the shot), i.e. someone
+        /// drew a box around the strip and threw the rest away. Feeding the
+        /// model a full 2048x1536 frame at inference time is therefore a
+        /// different composition than it was ever trained on, and the score
+        /// ends up describing the whole scene instead of the strip. This box
+        /// is what makes a live frame match the training crop.
+        ///
+        /// Applies to the live/camera path ONLY - manual Run Detection on a
+        /// file is untouched.</summary>
+        public bool RoiEnabled { get; set; } = true;
+        public double RoiNx { get; set; } = 0.15;
+        public double RoiNy { get; set; } = 0.15;
+        public double RoiNw { get; set; } = 0.70;
+        public double RoiNh { get; set; } = 0.70;
+
         // ── Continuous strip scan ────────────────────────────────────────────
         /// <summary>Encoder-triggered strip scanning: PCB address, field of
         /// view, overlap, capture delay. Re-read at the start of every run so

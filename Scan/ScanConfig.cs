@@ -16,6 +16,7 @@ namespace copperInspection.Scan
     public sealed class ScanConfig
     {
         public EncoderSettings Encoder { get; set; } = new();
+        public TriggerSettings Trigger { get; set; } = new();
         public CaptureDelaySettings CaptureDelay { get; set; } = new();
         public GeometrySettings Geometry { get; set; } = new();
         public ScanInspectionSettings Inspection { get; set; } = new();
@@ -71,23 +72,35 @@ namespace copperInspection.Scan
                 }
             }
 
-            // ── Encoder ──
-            if (!Simulate.Enabled)
+            // ── Trigger source ──
+            bool usesRealEncoder = Trigger.Mode == TriggerMode.Encoder && !Simulate.Enabled;
+
+            if (Trigger.Mode != TriggerMode.Encoder && Trigger.Mode != TriggerMode.Interval)
+                problems.Add(
+                    $"Scan.Trigger.Mode must be \"{TriggerMode.Encoder}\" or \"{TriggerMode.Interval}\", " +
+                    $"got \"{Trigger.Mode}\".");
+
+            if (Trigger.Mode == TriggerMode.Interval && Trigger.IntervalMs < 50)
+                problems.Add("Scan.Trigger.IntervalMs must be at least 50 ms.");
+
+            // Real-encoder-only checks: an Interval-mode or Simulate run never
+            // talks to the PCB at all, so none of this applies to it.
+            if (usesRealEncoder)
             {
                 if (!Encoder.TryBuildUri(out _, out string? urlError))
                     problems.Add(urlError!);
+
+                if (Encoder.PollHz < 1 || Encoder.PollHz > 500)
+                    problems.Add("Scan.Encoder.PollHz must be between 1 and 500.");
+
+                if (Encoder.TimeoutMs < 10)
+                    problems.Add("Scan.Encoder.TimeoutMs is too small; use at least 10 ms.");
+
+                if (Encoder.MaxStaleMs < Encoder.TimeoutMs)
+                    problems.Add(
+                        "Scan.Encoder.MaxStaleMs must be at least as large as TimeoutMs, " +
+                        "or a single slow response would be treated as a dead encoder.");
             }
-
-            if (Encoder.PollHz < 1 || Encoder.PollHz > 500)
-                problems.Add("Scan.Encoder.PollHz must be between 1 and 500.");
-
-            if (Encoder.TimeoutMs < 10)
-                problems.Add("Scan.Encoder.TimeoutMs is too small; use at least 10 ms.");
-
-            if (Encoder.MaxStaleMs < Encoder.TimeoutMs)
-                problems.Add(
-                    "Scan.Encoder.MaxStaleMs must be at least as large as TimeoutMs, " +
-                    "or a single slow response would be treated as a dead encoder.");
 
             // ── Run ──
             if (Run.QueueCapacity < 1)
@@ -108,6 +121,37 @@ namespace copperInspection.Scan
 
             return problems;
         }
+    }
+
+    /// <summary>String constants for <see cref="TriggerSettings.Mode"/> -
+    /// kept as named constants rather than a C# enum so the config.json value
+    /// is a readable word, not a number, same convention as
+    /// RunSettings.StoreImagesFor.</summary>
+    public static class TriggerMode
+    {
+        /// <summary>Capture is driven by real strip position - either the
+        /// real encoder PCB over HTTP, or (if Simulate.Enabled) a software
+        /// speed ramp standing in for it. This is the existing, unchanged
+        /// behaviour and stays the default.</summary>
+        public const string Encoder = "Encoder";
+
+        /// <summary>Capture fires on a fixed wall-clock period
+        /// (Trigger.IntervalMs) with no distance measurement involved at
+        /// all - see Scan/IntervalEncoderSource.cs. Each tick still counts
+        /// as exactly one segment (one PitchMm of assumed travel), so
+        /// ScanController/ScanPipeline/StripRunRecorder need no changes to
+        /// support it - only the trigger source changes.</summary>
+        public const string Interval = "Interval";
+    }
+
+    /// <summary>Which trigger source drives the scan - see <see cref="TriggerMode"/>.</summary>
+    public sealed class TriggerSettings
+    {
+        public string Mode { get; set; } = TriggerMode.Encoder;
+
+        /// <summary>Only used when Mode == Interval: how often to fire a
+        /// capture, in milliseconds.</summary>
+        public double IntervalMs { get; set; } = 1000.0;
     }
 
     /// <summary>

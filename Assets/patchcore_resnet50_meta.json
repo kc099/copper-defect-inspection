@@ -1,9 +1,18 @@
 {
   "backbone": "resnet50",
   "feature_dim": 2560,
-  "num_patches": 6144,
-  "threshold": 6.698276996612549,
-  "image_min": 6.192826747894287,
-  "image_max": 12.385653495788574,
-  "is_grayscale": true
+  "num_patches": 4505,
+  "threshold": 6.0913543701171875,
+  "image_min": 6.090686798095703,
+  "image_max": 12.181373596191406,
+  "is_grayscale": true,
+  "segmentation": {
+    "mode": "Silhouette",
+    "flatten": true,
+    "auto_threshold": false,
+    "threshold": 90,
+    "morph": 5,
+    "keep": 1,
+    "fill": true
+  }
 }

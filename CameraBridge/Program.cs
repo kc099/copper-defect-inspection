@@ -18,14 +18,21 @@ using NeoAPI;
 using OpenCvSharp;
 using copperInspection.Camera.Protocol;
 
-string logPath = Path.Combine(AppContext.BaseDirectory, "CameraBridge.log");
+// One CameraBridge.exe instance = one physical camera. copperInspection.exe
+// launches one instance per channel ("A", "B", ...) so N cameras just mean N
+// of these processes, each fully independent - own pipes, own log file, own
+// crash blast radius. Defaults to "A" only so this still runs standalone
+// (e.g. for manual testing) without an argument.
+string channel = args.Length > 0 ? args[0] : "A";
+
+string logPath = Path.Combine(AppContext.BaseDirectory, $"CameraBridge.{channel}.log");
 
 // Every line goes both to stdout - which copperInspection.exe redirects and
 // shows live in its own UI, see BaumerCamera.cs - and to a file, so there's
 // still a record if the app closes before you get to read it live.
 void Log(string msg)
 {
-    string line = $"{DateTime.Now:HH:mm:ss.fff} {msg}";
+    string line = $"{DateTime.Now:HH:mm:ss.fff} [{channel}] {msg}";
     Console.WriteLine(line);
     try { File.AppendAllText(logPath, line + Environment.NewLine); }
     catch { /* logging must never be the thing that crashes this process */ }
@@ -45,8 +52,8 @@ StreamState state = new();
 object frameLock = new();
 Mat? latestFrame = null;
 
-using var controlPipe = new NamedPipeServerStream(PipeNames.Control, PipeDirection.InOut, 1);
-using var previewPipe = new NamedPipeServerStream(PipeNames.Preview, PipeDirection.Out, 1);
+using var controlPipe = new NamedPipeServerStream(PipeNames.Control(channel), PipeDirection.InOut, 1);
+using var previewPipe = new NamedPipeServerStream(PipeNames.Preview(channel), PipeDirection.Out, 1);
 
 Log("Waiting for control connection...");
 controlPipe.WaitForConnection();

@@ -14,7 +14,13 @@ namespace copperInspection.Scan
     /// <see cref="StripRunRecorder.SegmentImagesReady"/>. Every Mat here is
     /// only valid for the duration of that event - see its doc comment.
     /// </summary>
-    public sealed record SegmentImages(int Segment, Mat Original, Mat BackgroundSubtracted, Mat Overlay);
+    /// <summary>Verdict travels with the images so a live view can show the
+    /// GOOD/BAD banner per segment - SegmentRecord (the other per-segment
+    /// event) only carries Outcome, i.e. whether the capture/inspection
+    /// happened at all, not what it decided.</summary>
+    public sealed record SegmentImages(
+        int Segment, Mat Original, Mat BackgroundSubtracted, Mat Overlay,
+        string Verdict, double Score, string Method);
 
     /// <summary>
     /// Owns the data side of one strip run: inspects each segment as it comes
@@ -122,7 +128,8 @@ namespace copperInspection.Scan
             // Still inside the "using" - these Mats are valid here and won't
             // be after this method moves on.
             SegmentImagesReady?.Invoke(new SegmentImages(
-                job.Segment, result.Original, result.BackgroundSubtracted, result.Overlay));
+                job.Segment, result.Original, result.BackgroundSubtracted, result.Overlay,
+                result.Verdict, result.Score, result.Method));
 
             lock (_lock)
             {

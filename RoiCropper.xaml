@@ -1,0 +1,50 @@
+<UserControl x:Class="copperInspection.RoiCropper"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="Transparent"
+             ClipToBounds="True">
+
+    <!-- Transparent overlay: it sits ON TOP of the live preview Image rather
+         than containing it, so nothing about how frames are painted has to
+         change. Hit-testing is limited to the box and its handles (the Canvas
+         itself has no background) so the rest of the preview stays clickable. -->
+    <Canvas x:Name="HostCanvas" Background="Transparent">
+
+        <!-- The ROI box -->
+        <Rectangle x:Name="RoiBox"
+                   Stroke="#38BDF8" StrokeThickness="2"
+                   Fill="#1438BDF8"
+                   Cursor="SizeAll"
+                   MouseLeftButtonDown="Box_MouseLeftButtonDown"
+                   MouseMove="Box_MouseMove"
+                   MouseLeftButtonUp="Box_MouseLeftButtonUp"/>
+
+        <!-- Corner handles. Tag carries which corner, so one pair of handlers
+             serves all four. -->
+        <Rectangle x:Name="HandleTL" Tag="TL" Width="12" Height="12"
+                   Fill="#38BDF8" Stroke="White" StrokeThickness="1" Cursor="SizeNWSE"
+                   MouseLeftButtonDown="Handle_MouseLeftButtonDown"
+                   MouseMove="Handle_MouseMove"
+                   MouseLeftButtonUp="Handle_MouseLeftButtonUp"/>
+        <Rectangle x:Name="HandleTR" Tag="TR" Width="12" Height="12"
+                   Fill="#38BDF8" Stroke="White" StrokeThickness="1" Cursor="SizeNESW"
+                   MouseLeftButtonDown="Handle_MouseLeftButtonDown"
+                   MouseMove="Handle_MouseMove"
+                   MouseLeftButtonUp="Handle_MouseLeftButtonUp"/>
+        <Rectangle x:Name="HandleBL" Tag="BL" Width="12" Height="12"
+                   Fill="#38BDF8" Stroke="White" StrokeThickness="1" Cursor="SizeNESW"
+                   MouseLeftButtonDown="Handle_MouseLeftButtonDown"
+                   MouseMove="Handle_MouseMove"
+                   MouseLeftButtonUp="Handle_MouseLeftButtonUp"/>
+        <Rectangle x:Name="HandleBR" Tag="BR" Width="12" Height="12"
+                   Fill="#38BDF8" Stroke="White" StrokeThickness="1" Cursor="SizeNWSE"
+                   MouseLeftButtonDown="Handle_MouseLeftButtonDown"
+                   MouseMove="Handle_MouseMove"
+                   MouseLeftButtonUp="Handle_MouseLeftButtonUp"/>
+
+        <Border x:Name="RoiLabel" Background="#CC0E0E1C" CornerRadius="3" Padding="5,2">
+            <TextBlock x:Name="RoiLabelText" Text="ROI" Foreground="#38BDF8"
+                       FontSize="10" FontWeight="SemiBold"/>
+        </Border>
+    </Canvas>
+</UserControl>

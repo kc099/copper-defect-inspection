@@ -257,11 +257,21 @@ namespace copperInspection.Scan
         /// </summary>
         private void UpdateSpeed(in EncoderSample sample)
         {
-            // Samples don't carry a wall clock, so time is counted in poll
-            // intervals. The poll rate is fixed, so an arrival index is a good
-            // enough time base - and it keeps the controller deterministic,
-            // which is what makes it testable.
-            double pollSec = _cfg.Encoder.PollHz > 0 ? 1.0 / _cfg.Encoder.PollHz : 0.02;
+            // Samples don't carry a wall clock, so time is counted in
+            // arrival intervals - deliberately, it keeps the controller
+            // deterministic and testable with no clock of its own. That only
+            // works if this assumed interval actually matches how often
+            // samples arrive: Encoder.PollHz for the real/Simulate source,
+            // or Trigger.IntervalMs for IntervalEncoderSource, which arrives
+            // at a completely different (usually much slower) rate. Getting
+            // this wrong doesn't just mis-estimate speed - it was observed
+            // to multiply straight through into a wildly inflated predicted
+            // lead distance, which skipped several segments per tick instead
+            // of firing exactly one (confirmed via a standalone test before
+            // Interval mode shipped).
+            double pollSec = _cfg.Trigger.Mode == TriggerMode.Interval
+                ? Math.Max(0.001, _cfg.Trigger.IntervalMs / 1000.0)
+                : (_cfg.Encoder.PollHz > 0 ? 1.0 / _cfg.Encoder.PollHz : 0.02);
             _clockSec += pollSec;
 
             _window[_windowNext] = (sample.PositionMm, _clockSec);

@@ -21,14 +21,20 @@ namespace copperInspection.Camera.Protocol
     {
         /// <summary>Bidirectional request/response: list/connect/start/stop/
         /// capture. One request in flight at a time - the WPF app is the
-        /// only client there will ever be.</summary>
-        public const string Control = "copperInspection.camera.control";
+        /// only client there will ever be.
+        ///
+        /// Parameterized by channel ("A", "B", ...) so more than one physical
+        /// camera can run: each gets its own CameraBridge.exe instance
+        /// (launched with the channel as its one command-line argument) and
+        /// its own pair of pipes, completely independent of any other
+        /// channel's process, pipes, or camera connection.</summary>
+        public static string Control(string channel) => $"copperInspection.camera.control.{channel}";
 
         /// <summary>One-directional (bridge -> app): a continuous stream of
         /// JPEG-encoded preview frames while streaming is active. Lossy on
         /// purpose - it's for on-screen preview only. Capture always goes
         /// through the control pipe instead, for a fresh, lossless frame.</summary>
-        public const string Preview = "copperInspection.camera.preview";
+        public static string Preview(string channel) => $"copperInspection.camera.preview.{channel}";
     }
 
     /// <summary>Simple length-prefixed framing over a NamedPipe stream: a

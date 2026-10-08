@@ -30,8 +30,18 @@ namespace copperInspection
         private string? _loadedBackbone = null;
         private bool _busy = false;
 
-        // Baumer live camera feed - see Camera/BaumerCamera.cs.
-        private readonly BaumerCamera _camera = new();
+        // Baumer live camera feed - see Camera/BaumerCamera.cs. _camera is
+        // the primary camera - the one CameraCombo/Start/Stop Stream control,
+        // exactly as before. _cameraB is a second one, auto-detected and
+        // auto-connected with no manual controls of its own (v1 - see
+        // ConnectCameraBAsync): when a second physical camera is found, its
+        // live feed and results take over slots 2 and 4 instead of those
+        // slots showing manual Run Detection's background-subtracted/mask
+        // views. Each camera talks to its own CameraBridge.exe process
+        // ("A"/"B" channels), never sharing one - see Camera/CameraProtocol.cs.
+        private readonly BaumerCamera _camera = new("A");
+        private readonly BaumerCamera _cameraB = new("B");
+        private bool _dualCameraMode = false;
         private List<CameraDeviceInfo> _cameraDevices = new();
         private DispatcherTimer? _liveViewTimer;
         private bool _liveViewActive = false;
@@ -42,7 +52,7 @@ namespace copperInspection
         // really does capture a frame, run it through InspectionEngine, and
         // write a real DefectReport + StripRun to MongoDB. Remove once C9
         // (the real panel) exists.
-        private Scan.HttpEncoderSource? _encoderProbe;
+        private Scan.IEncoderSource? _encoderProbe;
         private Scan.ScanPipeline? _scanPipelineProbe;
         private Scan.StripRunRecorder? _stripRecorderProbe;
         private Scan.ScanState _scanProbeLastState = Scan.ScanState.Idle;
@@ -61,13 +71,17 @@ namespace copperInspection
             // Show CameraBridge.exe's own diagnostics live instead of making
             // anyone go find CameraBridge.log by hand.
             _camera.LogLineReceived += OnCameraLogLine;
+            _cameraB.LogLineReceived += line => OnCameraLogLine($"[CamB] {line}");
 
             // Discovery/connect can take a moment (GenICam device enumeration) -
             // run it off the UI thread so a missing/slow camera never delays
             // the window opening.
             _ = InitCameraAsync();
 
-            StartEncoderProbe();
+            // ApplyConfig() above already started the scan probe via
+            // TriggerModeCombo's SelectionChanged handler - see its comment.
+
+            StartMongoWatch();
         }
 
         private void OnCameraLogLine(string line)
@@ -104,17 +118,36 @@ namespace copperInspection
         /// don't matter for exercising trigger math either - only geometry
         /// does. The real pre-flight gate belongs on the future Arm button.
         /// </summary>
+        /// <summary>Builds whichever trigger source Scan.Trigger.Mode asks
+        /// for ("Encoder" - the existing, unchanged HTTP poll - or
+        /// "Interval" - a fixed wall-clock period, see
+        /// Scan/IntervalEncoderSource.cs) and arms the scan probe against
+        /// it. Also callable again later (TriggerModeCombo_SelectionChanged)
+        /// to switch modes live - StopScanTrigger() tears down whatever is
+        /// currently running first so the two can never run at once.</summary>
         private void StartEncoderProbe()
         {
+            if (_config.Scan.Trigger.Mode == Scan.TriggerMode.Interval)
+            {
+                _encoderProbe = new Scan.IntervalEncoderSource(_config.Scan);
+                _ = ArmScanProbeAsync();
+                OnCameraLogLine(
+                    $"[Encoder] Interval mode - firing every {_config.Scan.Trigger.IntervalMs:F0} ms, " +
+                    "no distance measurement involved.");
+                _encoderProbe.Start();
+                return;
+            }
+
             if (_config.Scan.Simulate.Enabled)
             {
                 OnCameraLogLine("[Encoder] Scan.Simulate.Enabled is true - not polling HTTP.");
                 return;
             }
 
+            Scan.HttpEncoderSource httpSource;
             try
             {
-                _encoderProbe = new Scan.HttpEncoderSource(_config.Scan);
+                httpSource = new Scan.HttpEncoderSource(_config.Scan);
             }
             catch (InvalidOperationException ex)
             {
@@ -122,21 +155,103 @@ namespace copperInspection
                 OnCameraLogLine($"[Encoder] not started: {ex.Message}");
                 return;
             }
+            _encoderProbe = httpSource;
 
             // These fire from the poll loop's own background thread;
             // OnCameraLogLine already marshals to the UI thread via
             // Dispatcher.BeginInvoke, same as it does for the camera bridge.
-            _encoderProbe.LogLineReceived += line => OnCameraLogLine($"[Encoder] {line}");
-            _encoderProbe.Faulted += why => OnCameraLogLine($"[Encoder] FAULT: {why}");
+            httpSource.LogLineReceived += line => OnCameraLogLine($"[Encoder] {line}");
+            httpSource.Faulted += why => OnCameraLogLine($"[Encoder] FAULT: {why}");
 
             _ = ArmScanProbeAsync();
 
             OnCameraLogLine($"[Encoder] polling {_config.Scan.Encoder.BaseUrl}{_config.Scan.Encoder.Path} " +
                              $"at {_config.Scan.Encoder.PollHz} Hz…");
-            _encoderProbe.Start();
+            httpSource.Start();
         }
 
-       
+        /// <summary>Tears down whatever trigger source/pipeline/open
+        /// StripRun is currently running, best-effort, so a fresh
+        /// StartEncoderProbe() call never ends up with two trigger sources
+        /// feeding one ScanController at once. Used when the Trigger Mode
+        /// dropdown changes.</summary>
+        private async Task StopScanTriggerAsync()
+        {
+            // Order matters: kill the trigger source FIRST so no new frames
+            // can be queued, then tell the pipeline to wind down, and only
+            // then finalise and drop the recorder. Tearing down in the other
+            // order leaves the consumer thread holding frames whose recorder
+            // has already been nulled.
+            _encoderProbe?.Stop();
+            _encoderProbe?.Dispose();
+            _encoderProbe = null;
+
+            try { _scanPipelineProbe?.End(); }
+            catch (Exception ex) { OnCameraLogLine($"[Scan] pipeline end: {ex.Message}"); }
+
+            if (_scanPipelineProbe != null && _stripRecorderProbe != null)
+            {
+                try
+                {
+                    await _stripRecorderProbe.FinishAsync(
+                        _scanPipelineProbe.Records, Scan.ScanEndReason.Operator);
+                }
+                catch (Exception ex)
+                {
+                    OnCameraLogLine($"[Scan] could not finalise StripRun while switching trigger mode: {ex.Message}");
+                }
+            }
+
+            _scanPipelineProbe = null;
+            _stripRecorderProbe = null;
+            _scanProbeLastState = Scan.ScanState.Idle;
+        }
+
+        /// <summary>"Encoder" / "Fixed Interval" - see the TriggerModeCombo
+        /// XAML and StartEncoderProbe. Switching live tears down and
+        /// re-arms the whole probe, same sequence FinishAndRearmAsync
+        /// already uses between one strip and the next.</summary>
+        private async void TriggerModeCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        {
+            if (TriggerModeCombo.SelectedIndex < 0) return;
+            bool interval = TriggerModeCombo.SelectedIndex == 1;
+
+            _config.Scan.Trigger.Mode = interval ? Scan.TriggerMode.Interval : Scan.TriggerMode.Encoder;
+            if (double.TryParse(TriggerIntervalBox.Text, out double ms) && ms > 0)
+                _config.Scan.Trigger.IntervalMs = ms;
+            TriggerIntervalBox.IsEnabled = interval;
+
+            // Saved immediately rather than waiting for OnClosing: an abnormal
+            // exit (debugger stop, crash) skips OnClosing entirely, which
+            // silently threw away the selection and started the next session
+            // back on Encoder mode - looking exactly like "the dropdown
+            // doesn't work".
+            ConfigStore.Save(CollectConfig());
+
+            OnCameraLogLine($"[Scan] switching trigger mode -> {_config.Scan.Trigger.Mode}…");
+            await StopScanTriggerAsync();
+            StartEncoderProbe();
+        }
+
+        /// <summary>Picks up an edited interval value without needing to
+        /// toggle the mode dropdown off and back on - only restarts the
+        /// probe if Interval mode is actually the one currently selected
+        /// (editing the box while on Encoder mode just saves the number for
+        /// next time Interval is picked).</summary>
+        private async void TriggerIntervalBox_LostFocus(object sender, RoutedEventArgs e)
+        {
+            if (!double.TryParse(TriggerIntervalBox.Text, out double ms) || ms <= 0) return;
+            if (ms == _config.Scan.Trigger.IntervalMs) return;
+
+            _config.Scan.Trigger.IntervalMs = ms;
+            ConfigStore.Save(CollectConfig());   // see the note in TriggerModeCombo_SelectionChanged
+            if (_config.Scan.Trigger.Mode != Scan.TriggerMode.Interval) return;
+
+            OnCameraLogLine($"[Scan] interval changed -> {ms:F0} ms, restarting trigger…");
+            await StopScanTriggerAsync();
+            StartEncoderProbe();
+        }
+
         private async Task ArmScanProbeAsync()
         {
             try
@@ -197,8 +312,18 @@ namespace copperInspection
             _scanPipelineProbe = new Scan.ScanPipeline(
                 _config.Scan,
                 _encoderProbe!,
-                () => _camera.CaptureFullFrame(),
-                job => _stripRecorderProbe!.InspectSegmentAsync(job));
+                // Cropped to the inspection ROI before it ever reaches
+                // PatchCore - the models were trained on manually cropped
+                // stills, not full 2048x1536 frames (see PipelineConfig.Roi*).
+                () => CropToRoi(_camera.CaptureFullFrame()),
+                // Null-SAFE, not null-forgiving. The pipeline's consumer
+                // thread can still be holding a queued frame when the run is
+                // torn down (Stop Stream, or a trigger-mode switch), and
+                // "_stripRecorderProbe!" threw a NullReferenceException right
+                // there the moment that happened. A job arriving after the
+                // run has closed has nowhere legitimate to be recorded, so
+                // dropping it is the correct outcome - not crashing.
+                job => _stripRecorderProbe?.InspectSegmentAsync(job) ?? Task.CompletedTask);
 
             _scanPipelineProbe.SegmentFinished += rec => OnCameraLogLine(
                 $"[Scan] segment {rec.Segment}   [{rec.StartMm:F1}-{rec.EndMm:F1}]mm   " +
@@ -331,10 +456,37 @@ namespace copperInspection
                 result.Freeze();
                 Dispatcher.BeginInvoke(() =>
                 {
+                    // Whoever is looking at a manual Run Detection / Capture
+                    // result owns these panels until they restart the live
+                    // view. Without this the scan repainted all four slots a
+                    // second later, so an uploaded image's result flashed up
+                    // and vanished - it looked like the manual run had been
+                    // ignored. The scan still records every segment to
+                    // MongoDB either way; only the on-screen panels are held.
+                    if (!_liveViewActive) return;
+
                     Cam1TargetImage.Source = feed;     // camera 1 feed
-                    Cam1ResultImage.Source = feed;     // camera 2 feed (mirrored)
                     Cam2TargetImage.Source = result;   // camera 1 result
-                    Cam2ResultImage.Source = result;   // camera 2 result (mirrored)
+
+                    // Slots 2 and 4 belong to camera 2 whenever a real second
+                    // camera is connected - mirroring camera 1 into them then
+                    // would overwrite camera 2's live feed on EVERY segment
+                    // (once a second in Interval mode), so the second feed
+                    // could never stay on screen. Only fall back to mirroring
+                    // when there genuinely is no second camera.
+                    if (!_dualCameraMode)
+                    {
+                        Cam1ResultImage.Source = feed;     // camera 2 feed (mirrored)
+                        Cam2ResultImage.Source = result;   // camera 2 result (mirrored)
+                    }
+
+                    // Without this the GOOD/BAD banner only ever reflected a
+                    // manual Run Detection / Capture - a running scan updated
+                    // all four images every segment while the banner sat
+                    // hidden, so there was no verdict on screen at all for
+                    // the thing actually being inspected.
+                    ShowVerdictBadge(images.Verdict, images.Score, images.Method,
+                        $"segment {images.Segment}");
                 });
             };
 
@@ -345,7 +497,18 @@ namespace copperInspection
             }
             catch (Exception ex)
             {
+                // Loud on purpose. This is a hard stop - the pipeline is never
+                // armed below, so NOTHING gets captured or inspected and the
+                // whole UI just sits there looking idle. Previously this was
+                // one line in a small scrolling log box, which reads exactly
+                // like "inference is broken" rather than "the database is
+                // down" (the usual cause being mongod not running, e.g. when
+                // the disk is full).
                 OnCameraLogLine($"[Scan] not armed: could not open a StripRun in MongoDB: {ex.Message}");
+                StatusLabel.Text =
+                    "SCAN NOT ARMED — MongoDB unreachable (mongodb://localhost:27017). " +
+                    "No frames will be captured or inspected until it is running.";
+                ShowScanBlockedPopup(ex);
                 return;
             }
 
@@ -428,6 +591,84 @@ namespace copperInspection
                 _folderPath = c.LastFolder;
                 LoadImagesFromFolder(_folderPath);
             }
+
+            // Setting SelectedIndex fires TriggerModeCombo_SelectionChanged,
+            // which is also what actually starts the scan probe - same "only
+            // one place ever starts this" pattern CameraCombo already uses,
+            // so set the interval textbox FIRST or the handler would read its
+            // own not-yet-applied default back into _config.Scan instead of
+            // config.json's value.
+            TriggerIntervalBox.Text = c.Scan.Trigger.IntervalMs.ToString("F0");
+            TriggerModeCombo.SelectedIndex = c.Scan.Trigger.Mode == Scan.TriggerMode.Interval ? 1 : 0;
+
+            // Restore the live-camera ROI and keep config.json in step with
+            // whatever the operator drags it to.
+            LiveRoi.Roi = new NormalizedRoi(c.RoiNx, c.RoiNy, c.RoiNw, c.RoiNh);
+            LiveRoi.RoiChanged += roi =>
+            {
+                _config.RoiNx = roi.X;
+                _config.RoiNy = roi.Y;
+                _config.RoiNw = roi.W;
+                _config.RoiNh = roi.H;
+                ConfigStore.Save(CollectConfig());
+                StatusLabel.Text =
+                    $"Inspection ROI set to {LiveRoi.GetPixelRoi().Width}×{LiveRoi.GetPixelRoi().Height} px " +
+                    "of each live frame.";
+            };
+        }
+
+        /// <summary>
+        /// Writes the EXACT pixels that are about to be inspected to a PNG,
+        /// so the identical frame can be re-run through the file path
+        /// (Browse -> Run Detection) and the two verdicts compared.
+        ///
+        /// This exists to answer one specific question that is otherwise
+        /// unanswerable: trained stills score GOOD while live captures score
+        /// BAD, and the live path has things the file path does not (the ROI
+        /// crop, the camera itself). Same pixels through both paths splits
+        /// that cleanly - differing verdicts mean a code-path bug, matching
+        /// verdicts mean the live IMAGE differs from the training data
+        /// (exposure/lighting), which is not something software can fix.
+        ///
+        /// PNG because it must be lossless: a JPEG round trip would change
+        /// the very pixels being compared.
+        ///
+        /// Saved on an explicit Capture click only - never from the scan,
+        /// which would write a file every interval tick.
+        /// </summary>
+        private string? SaveLiveCapture(Mat frame, string tag)
+        {
+            try
+            {
+                string dir = Path.Combine(AppContext.BaseDirectory, "LiveCaptures");
+                Directory.CreateDirectory(dir);
+                string path = Path.Combine(dir, $"{DateTime.Now:yyyyMMdd_HHmmss_fff}_{tag}.png");
+                Cv2.ImWrite(path, frame);
+                return path;
+            }
+            catch (Exception ex)
+            {
+                OnCameraLogLine($"[Capture] could not save frame: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>The live-camera crop, read fresh from config each time so
+        /// dragging the box takes effect on the very next frame.
+        ///
+        /// Live/camera path ONLY - a file opened through Run Detection is
+        /// never cropped, because it is already whatever composition the
+        /// operator chose. Returns null straight through so callers can keep
+        /// treating "no frame" as one case.</summary>
+        private Mat? CropToRoi(Mat? frame)
+        {
+            if (frame == null || frame.Empty()) return frame;
+
+            var roi = new NormalizedRoi(_config.RoiNx, _config.RoiNy, _config.RoiNw, _config.RoiNh);
+            using (frame)
+            {
+                return RoiCrop.Apply(frame, roi, _config.RoiEnabled);
+            }
         }
 
         private void UpdateReferenceSwatch()
@@ -473,6 +714,18 @@ namespace copperInspection
             ColorDiffMorphKernel = _config.ColorDiffMorphKernel,
             ReferenceColorPath = _config.ReferenceColorPath,
 
+            // Carried forward from the live object, same reason as Scan below:
+            // CollectConfig() builds a BRAND NEW PipelineConfig, so any field
+            // not copied here silently reverts to its default on every save
+            // (which happens on app close AND on every Run Detection click).
+            // Without these five lines a dragged ROI would survive until the
+            // next click and then quietly snap back to the 0.15/0.70 default.
+            RoiEnabled = _config.RoiEnabled,
+            RoiNx = _config.RoiNx,
+            RoiNy = _config.RoiNy,
+            RoiNw = _config.RoiNw,
+            RoiNh = _config.RoiNh,
+
             // No UI edits this yet (no Strip Scan panel) - carry it forward
             // unchanged. Without this line, CollectConfig() silently produces
             // a brand-new default ScanConfig() instead (PipelineConfig.Scan's
@@ -492,6 +745,7 @@ namespace copperInspection
             ConfigStore.Save(_config);
             SetLiveViewActive(false);
             _camera.Dispose();
+            _cameraB.Dispose();
             // Best-effort: End() drains the queue asynchronously and the
             // window is closing regardless, so this may not finish before
             // the process exits - acceptable for a smoke-test probe, not for
@@ -645,6 +899,53 @@ namespace copperInspection
             // code path used when an operator later picks a different camera
             // from the dropdown, so there is only one place that ever connects.
             CameraCombo.SelectedIndex = 0;
+
+            // A second physical camera, if present, auto-connects on its own
+            // channel with no picker of its own (v1 - see the field comments
+            // on _cameraB). devices[0] is always primary/_camera above.
+            if (devices.Count >= 2)
+                _ = ConnectCameraBAsync(devices[1]);
+        }
+
+        /// <summary>Auto-connects the second camera and switches the image
+        /// grid into dual-camera mode: slots 1+2 become both cameras' live
+        /// feeds, slots 3+4 become both cameras' latest inspection results
+        /// (via CaptureBtn_Click's dual-capture path) instead of manual Run
+        /// Detection's Original/BackgroundSubtracted/Heatmap/Overlay mapping.
+        /// No manual Start/Stop/picker for this camera yet - it just runs
+        /// once found, same as the very first single-camera auto-connect did.</summary>
+        private async Task ConnectCameraBAsync(CameraDeviceInfo device)
+        {
+            string? error = null;
+            await Task.Run(() =>
+            {
+                if (!_cameraB.EnsureStarted()) { error = "camera bridge failed to start"; return; }
+                try { _cameraB.Connect(device); }
+                catch (Exception ex) { error = ex.Message; }
+            });
+
+            if (error != null)
+            {
+                OnCameraLogLine($"[CamB] connect failed: {error}");
+                return;
+            }
+
+            _dualCameraMode = true;
+            SetDualCameraLabels(true);
+            OnCameraLogLine($"[CamB] connected - dual camera view active ({device}).");
+        }
+
+        /// <summary>Swaps the four image-grid header labels between manual
+        /// Run Detection's meaning (Original/Background Subtracted/Distance
+        /// from Reference/Defect Mask) and dual-camera meaning (each
+        /// camera's live feed / each camera's latest result), so the labels
+        /// never lie about what's actually on screen.</summary>
+        private void SetDualCameraLabels(bool dual)
+        {
+            Slot1Header.Text = dual ? "Camera 1 — Live" : "Original Image";
+            Slot2Header.Text = dual ? "Camera 2 — Live" : "Background Subtracted";
+            Slot3Header.Text = dual ? "Camera 1 — Result" : "Distance from Reference";
+            Slot4Header.Text = dual ? "Camera 2 — Result" : "Defect Mask";
         }
 
         private async void CameraCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
@@ -686,18 +987,32 @@ namespace copperInspection
             _camera.StartStreaming();
             UpdateCameraButtonStates();
             SetLiveViewActive(true);
+
+            // Re-arm the scan if Stop Stream tore it down, so the pair of
+            // buttons is symmetric rather than one-way.
+            if (_encoderProbe == null) StartEncoderProbe();
+
             StatusLabel.Text = "Live stream started.";
         }
 
-        private void StopStreamBtn_Click(object sender, RoutedEventArgs e)
+        private async void StopStreamBtn_Click(object sender, RoutedEventArgs e)
         {
             // Testing with an uploaded file shouldn't fight the live feed for
             // slot 1 - this is the manual escape hatch for that, on top of the
             // automatic pause when a file is picked (TargetCombo_SelectionChanged).
             SetLiveViewActive(false);
             _camera.StopStreaming();
+
+            // ...and stop the SCAN too. Stopping the preview alone used to
+            // leave the interval timer running, so the pipeline kept asking
+            // the bridge for frames and inspecting them once a second - the
+            // camera looked stopped while captures and verdicts carried on
+            // underneath, overwriting whatever the operator was trying to
+            // look at. "Stop Stream" means stop using the camera, full stop.
+            await StopScanTriggerAsync();
+
             UpdateCameraButtonStates();
-            StatusLabel.Text = "Live stream stopped.";
+            StatusLabel.Text = "Live stream and strip scan stopped.";
         }
 
         /// <summary>Starts/stops the DispatcherTimer that paints slot 1 from the
@@ -723,14 +1038,35 @@ namespace copperInspection
             else
             {
                 _liveViewTimer?.Stop();
+                // Slot 1 is about to show a file or a frozen result instead -
+                // an ROI box over that would be meaningless, since only live
+                // frames are ever cropped.
+                LiveRoi.Visibility = Visibility.Collapsed;
             }
         }
 
         private void LiveViewTimer_Tick(object? sender, EventArgs e)
         {
             using Mat? frame = _camera.GetLatestPreviewFrame();
-            if (frame == null || frame.Empty()) return;
-            Cam1TargetImage.Source = MatToBmp(frame);
+            if (frame != null && !frame.Empty())
+            {
+                Cam1TargetImage.Source = MatToBmp(frame);
+
+                // The ROI box is positioned against the DISPLAYED picture, so
+                // it needs the frame's real size to account for letterboxing.
+                LiveRoi.SetSourceSize(frame.Width, frame.Height);
+                LiveRoi.Visibility = Visibility.Visible;
+            }
+
+            // Slot 2 normally belongs to manual Run Detection's own
+            // background-subtracted view - only steal it for camera 2's
+            // live feed while dual-camera mode is actually active.
+            if (_dualCameraMode)
+            {
+                using Mat? frameB = _cameraB.GetLatestPreviewFrame();
+                if (frameB != null && !frameB.Empty())
+                    Cam1ResultImage.Source = MatToBmp(frameB);
+            }
         }
 
         /// <summary>Single source of truth for the camera-related buttons'
@@ -890,6 +1226,12 @@ namespace copperInspection
         // ══════════════════════════════════════════════════════
         private async void CaptureBtn_Click(object sender, RoutedEventArgs e)
         {
+            if (_dualCameraMode)
+            {
+                await RunDualCaptureAsync();
+                return;
+            }
+
             if (!_camera.IsConnected || !_camera.IsStreaming)
             {
                 MessageBox.Show("No live camera stream - connect a camera and start the stream first.",
@@ -902,7 +1244,7 @@ namespace copperInspection
             // compressed for the live view and shouldn't feed detection.
             SetBusy(true);
             StatusLabel.Text = "Capturing frame…";
-            Mat? frame = await Task.Run(() => _camera.CaptureFullFrame());
+            Mat? frame = await Task.Run(() => CropToRoi(_camera.CaptureFullFrame()));
             SetBusy(false);
 
             if (frame == null || frame.Empty())
@@ -912,6 +1254,12 @@ namespace copperInspection
                     "Capture", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
+
+            // Exactly what inference is about to see, ROI crop included.
+            string? savedPath = SaveLiveCapture(frame, "capture");
+            if (savedPath != null)
+                OnCameraLogLine($"[Capture] frame saved for comparison: {savedPath} " +
+                                $"({frame.Width}x{frame.Height})");
 
             bool useDiff = RadioReferenceDiff.IsChecked == true;
             string? bgPath = null;
@@ -954,6 +1302,198 @@ namespace copperInspection
                 },
                 label, useDiff, bgPath, silhouetteParams, diffParams, detectionMethod,
                 colorThreshold, colorMinAreaPct, colorMorph, referenceBgr);
+
+            // Appended after the pipeline, which sets its own status text.
+            if (savedPath != null)
+                StatusLabel.Text += $"   ·   frame saved: {savedPath}";
+        }
+
+        // ══════════════════════════════════════════════════════
+        //  DUAL-CAMERA CAPTURE (two physical cameras connected -
+        //  see ConnectCameraBAsync/SetDualCameraLabels)
+        // ══════════════════════════════════════════════════════
+
+        /// <summary>Dual-camera version of Capture &amp; Inspect: captures and
+        /// runs inspection on BOTH cameras and paints camera 1's live capture
+        /// + result into slots 1+3, camera 2's into slots 2+4 (see
+        /// SetDualCameraLabels for what those slots are called while this is
+        /// active). Each camera's report is saved to MongoDB separately, so
+        /// nothing is lost from the report history versus single-camera use.
+        ///
+        /// Runs the two cameras SEQUENTIALLY, not in parallel: both share the
+        /// same cached PatchCoreDetector instance per backbone
+        /// (GetOrLoadDetector), and calling Inspect() on it from two threads
+        /// at once has never been audited for thread-safety - not worth the
+        /// risk of a hard-to-reproduce race for what's still a manual,
+        /// occasional button click.</summary>
+        private async Task RunDualCaptureAsync()
+        {
+            bool useDiff = RadioReferenceDiff.IsChecked == true;
+            string? bgPath = null;
+            if (useDiff)
+            {
+                if (ReferenceCombo.SelectedIndex < 0)
+                {
+                    MessageBox.Show("Select a background image for Reference-Image Diff mode.",
+                        "Selection Required", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+                bgPath = _imageFiles[ReferenceCombo.SelectedIndex];
+            }
+
+            string detectionMethod = RadioPatchCoreR50.IsChecked == true ? "PatchCore-R50"
+                                   : RadioPatchCoreR18.IsChecked == true ? "PatchCore-R18"
+                                   : "ColorDiff";
+            if (detectionMethod == "ColorDiff" && _referenceColor == null)
+            {
+                MessageBox.Show($"No reference colour loaded (Assets\\{_config.ReferenceColorPath} missing or invalid).",
+                    "Reference Colour Missing", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
+            var (silhouetteParams, diffParams, colorThreshold, colorMinAreaPct, colorMorph, referenceBgr) = SnapshotParams();
+            var settings = new InspectionSettings
+            {
+                UseDiff = useDiff,
+                BackgroundPath = bgPath,
+                Silhouette = silhouetteParams,
+                Diff = diffParams,
+                Method = detectionMethod,
+                ColorThreshold = colorThreshold,
+                ColorMinAreaPct = colorMinAreaPct,
+                ColorMorph = colorMorph,
+                ReferenceBgr = referenceBgr,
+            };
+
+            SetLiveViewActive(false);
+            SetBusy(true);
+            StatusLabel.Text = "Capturing both cameras…";
+
+            (InspectionResult? a, string? errA) = await CaptureAndInspectAsync(_camera, settings);
+            (InspectionResult? b, string? errB) = await CaptureAndInspectAsync(_cameraB, settings);
+
+            SetBusy(false);
+
+            if (a == null && b == null)
+            {
+                StatusLabel.Text = "Both cameras failed.";
+                MessageBox.Show($"Camera 1: {errA}\nCamera 2: {errB}", "Detection Failed",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
+            using (a) using (b)
+            {
+                string va = "Cam1: failed";
+                string vb = "Cam2: failed";
+                bool anyBad = false;
+
+                if (a != null)
+                {
+                    Cam1TargetImage.Source = MatToBmp(a.Original);
+                    Cam2TargetImage.Source = MatToBmp(a.Overlay);
+                    va = $"Cam1: {a.Verdict} ({DescribeScore(a)})";
+                    anyBad |= a.IsDefect;
+                    _ = SaveReportAsync(BuildCaptureReport(a, useDiff, "Live Capture Cam1"));
+                }
+                else
+                {
+                    OnCameraLogLine($"[CamA] capture/inspect failed: {errA}");
+                }
+
+                if (b != null)
+                {
+                    Cam1ResultImage.Source = MatToBmp(b.Original);
+                    Cam2ResultImage.Source = MatToBmp(b.Overlay);
+                    vb = $"Cam2: {b.Verdict} ({DescribeScore(b)})";
+                    anyBad |= b.IsDefect;
+                    _ = SaveReportAsync(BuildCaptureReport(b, useDiff, "Live Capture Cam2"));
+                }
+                else
+                {
+                    OnCameraLogLine($"[CamB] capture/inspect failed: {errB}");
+                }
+
+                if (anyBad)
+                {
+                    DefectCountLabel.Text = $"⚠ BAD — {va} · {vb}";
+                    DefectBadge.Visibility = Visibility.Visible;
+                    OkBadge.Visibility = Visibility.Collapsed;
+                }
+                else
+                {
+                    OkBadgeLabel.Text = $"✓ GOOD — {va} · {vb}";
+                    DefectBadge.Visibility = Visibility.Collapsed;
+                    OkBadge.Visibility = Visibility.Visible;
+                }
+
+                StatusLabel.Text = $"Done — {va} · {vb}";
+            }
+        }
+
+        private static string DescribeScore(InspectionResult r) =>
+            r.Method.StartsWith("PatchCore") ? $"Score: {r.Score:F3}" : $"{r.Score:F2}% defect area";
+
+        private DefectReport BuildCaptureReport(InspectionResult result, bool useDiff, string label)
+        {
+            Cv2.ImEncode(".png", result.Overlay, out byte[] png);
+            return new DefectReport
+            {
+                Timestamp = DateTime.UtcNow,
+                DefectCount = result.IsDefect ? 1 : 0,
+                Method = result.Method,
+                Mode = useDiff ? "ReferenceDiff" : "Silhouette",
+                ReferenceImage = useDiff ? (ReferenceCombo.SelectedItem as string ?? string.Empty) : string.Empty,
+                TargetImage = $"{label} {DateTime.Now:yyyy-MM-dd HH:mm:ss}",
+                ImageData = png,
+                ResultImageBase64 = "data:image/png;base64," + Convert.ToBase64String(png),
+            };
+        }
+
+        /// <summary>Captures a fresh, lossless frame from one camera and runs
+        /// it through InspectionEngine - the same engine manual single-camera
+        /// Capture and Run Detection use, so a dual-camera result can never
+        /// disagree with what a single-camera run of the same settings would
+        /// produce. Returns (null, reason) instead of throwing so one
+        /// camera's failure doesn't stop the other's capture in
+        /// RunDualCaptureAsync.</summary>
+        private async Task<(InspectionResult? result, string? error)> CaptureAndInspectAsync(
+            BaumerCamera cam, InspectionSettings settings)
+        {
+            if (!cam.IsConnected || !cam.IsStreaming)
+                return (null, "not connected/streaming");
+
+            InspectionResult? result = null;
+            string? error = null;
+            await Task.Run(() =>
+            {
+                try
+                {
+                    result = InspectionEngine.Run(
+                        isPatchCore =>
+                        {
+                            Mat? raw = CropToRoi(cam.CaptureFullFrame());
+                            if (raw == null || raw.Empty())
+                            {
+                                raw?.Dispose();
+                                throw new InvalidOperationException("No frame received from camera.");
+                            }
+
+                            // Same comparison aid as the single-camera path -
+                            // see SaveLiveCapture.
+                            SaveLiveCapture(raw, cam == _camera ? "cam1" : "cam2");
+                            if (isPatchCore) return raw;
+                            using Mat resized = raw;
+                            return ImageLoader.ResizeToDisplay(resized);
+                        },
+                        settings, GetOrLoadDetector);
+                }
+                catch (Exception ex)
+                {
+                    error = ex.Message;
+                }
+            });
+            return (result, error);
         }
 
         /// <summary>Reads the current parameter controls into the value types
@@ -1108,27 +1648,7 @@ namespace copperInspection
                 appliedSegNote = result.SegmentationNote;
                 verdict = result.Verdict;
 
-                string subLabel = result.Method.StartsWith("PatchCore")
-                    ? $"Score: {result.Score:F3}"
-                    : $"{result.Score:F2}% defect area";
-
-                if (verdict == "BAD")
-                {
-                    DefectCountLabel.Text = $"⚠ BAD ({subLabel})";
-                    DefectBadge.Visibility = Visibility.Visible;
-                    OkBadge.Visibility = Visibility.Collapsed;
-                }
-                else if (verdict == "GOOD")
-                {
-                    OkBadgeLabel.Text = $"✓ GOOD ({subLabel})";
-                    DefectBadge.Visibility = Visibility.Collapsed;
-                    OkBadge.Visibility = Visibility.Visible;
-                }
-                else
-                {
-                    DefectBadge.Visibility = Visibility.Collapsed;
-                    OkBadge.Visibility = Visibility.Collapsed;
-                }
+                ShowVerdictBadge(result.Verdict, result.Score, result.Method);
             }
 
             string modeNote = useDiff ? "reference-image diff" : "silhouette";
@@ -1203,6 +1723,159 @@ namespace copperInspection
             ProgressBar.IsIndeterminate = busy;
             ProgressBar.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
             UpdateCameraButtonStates();
+        }
+
+        private DispatcherTimer? _mongoWatchTimer;
+
+        /// <summary>
+        /// Polls MongoDB and shows the result as a coloured dot in the status
+        /// bar, because a stopped mongod is indistinguishable from a broken
+        /// camera or model from the UI alone: the scan silently never arms,
+        /// so nothing is captured or inspected and every panel stays empty.
+        ///
+        /// A plain TCP connect rather than a driver ping - it answers the
+        /// only question being asked here ("is the server up?"), costs
+        /// nothing, and can't be slowed down by the driver's own server
+        /// selection timeout while the UI waits on it.
+        /// </summary>
+        private void StartMongoWatch()
+        {
+            _mongoWatchTimer = new DispatcherTimer(DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromSeconds(5),
+            };
+            _mongoWatchTimer.Tick += async (_, _) => await RefreshMongoStatusAsync();
+            _mongoWatchTimer.Start();
+            _ = RefreshMongoStatusAsync();   // don't make the operator wait 5s for the first answer
+        }
+
+        private async Task RefreshMongoStatusAsync()
+        {
+            bool up = await Task.Run(() =>
+            {
+                try
+                {
+                    using var tcp = new System.Net.Sockets.TcpClient();
+                    return tcp.ConnectAsync("localhost", 27017).Wait(TimeSpan.FromMilliseconds(800))
+                           && tcp.Connected;
+                }
+                catch { return false; }
+            });
+
+            MongoDot.Fill = new SolidColorBrush(up
+                ? Color.FromRgb(0x22, 0xC5, 0x5E)    // green
+                : Color.FromRgb(0xEF, 0x44, 0x44));  // red
+            MongoStatusText.Text = up ? "MongoDB: running" : "MongoDB: NOT RUNNING";
+            MongoStatusText.Foreground = new SolidColorBrush(up
+                ? Color.FromRgb(0x90, 0x90, 0xB8)
+                : Color.FromRgb(0xEF, 0x44, 0x44));
+            MongoStatusText.ToolTip = up
+                ? "mongodb://localhost:27017 is reachable."
+                : "mongodb://localhost:27017 is NOT reachable. Strip scanning cannot arm, " +
+                  "so no frames will be captured or inspected. Start it from an admin " +
+                  "PowerShell with:  net start MongoDB";
+        }
+
+        /// <summary>Set once a session so re-arming (which happens after
+        /// every finished strip) can't turn one dead database into a popup
+        /// every few seconds.</summary>
+        private bool _scanBlockedPopupShown;
+
+        /// <summary>
+        /// A blocking popup for the ONE failure that silently stops
+        /// everything: no StripRun means the pipeline never arms, so no frame
+        /// is captured, nothing is inspected, no banner appears and all four
+        /// image slots stay empty - which looks identical to "the camera or
+        /// the model is broken".
+        ///
+        /// This cost two hours of debugging once, because the only signal was
+        /// a single line in a small scrolling log box. It states the actual
+        /// cause and the actual fix, and checks the two things that are
+        /// nearly always behind it (service stopped, disk full) rather than
+        /// just echoing a MongoDB timeout nobody can act on.
+        /// </summary>
+        private void ShowScanBlockedPopup(Exception ex)
+        {
+            if (_scanBlockedPopupShown) return;
+            _scanBlockedPopupShown = true;
+
+            // Deliberately a TCP probe rather than ServiceController: that
+            // type lives in a separate NuGet package, and "is the port
+            // answering" is the question that actually matters here anyway -
+            // a running service with a wedged server would still be useless.
+            bool portOpen;
+            try
+            {
+                using var tcp = new System.Net.Sockets.TcpClient();
+                portOpen = tcp.ConnectAsync("localhost", 27017).Wait(TimeSpan.FromMilliseconds(800))
+                           && tcp.Connected;
+            }
+            catch { portOpen = false; }
+            string serviceState = portOpen
+                ? "port 27017 is open (but the run still could not be opened)"
+                : "NOT reachable on port 27017 - the server is not running";
+
+            string diskNote = "";
+            try
+            {
+                var drive = new DriveInfo(Path.GetPathRoot(AppContext.BaseDirectory) ?? "C:\\");
+                double freeGb = drive.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0;
+                diskNote = $"\n  • Free space on {drive.Name}  :  {freeGb:F1} GB" +
+                           (freeGb < 2 ? "   ← too low, MongoDB will refuse to run" : "");
+            }
+            catch { /* diagnostics must never be the thing that throws */ }
+
+            MessageBox.Show(
+                "Strip scanning is NOT running.\n\n" +
+                "The app could not open a run record in MongoDB, so the scan was never armed. " +
+                "Until this is fixed:\n" +
+                "  • no frames are captured\n" +
+                "  • nothing is inspected\n" +
+                "  • the GOOD/BAD banner and the four image panels stay empty\n\n" +
+                "This is NOT a camera or model problem.\n\n" +
+                "Checked just now:\n" +
+                $"  • MongoDB               :  {serviceState}" +
+                diskNote +
+                "\n  • Connection            :  mongodb://localhost:27017\n\n" +
+                "To fix: free up disk space if it is low, then start MongoDB from an " +
+                "ADMIN PowerShell:\n\n" +
+                "    net start MongoDB\n\n" +
+                "Then restart this app.\n\n" +
+                $"Underlying error: {ex.Message}",
+                "Scan not armed — MongoDB unavailable",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+
+        /// <summary>The one place the GOOD/BAD banner is rendered, so a
+        /// manual run, a Capture and a scanned segment can't end up showing
+        /// it in three slightly different ways (or, as happened with the
+        /// scan, not showing it at all). An unknown verdict hides both
+        /// badges rather than guessing.</summary>
+        private void ShowVerdictBadge(string verdict, double score, string method, string? context = null)
+        {
+            string subLabel = method.StartsWith("PatchCore")
+                ? $"Score: {score:F3}"
+                : $"{score:F2}% defect area";
+            if (context != null) subLabel = $"{context} · {subLabel}";
+
+            if (verdict == "BAD")
+            {
+                DefectCountLabel.Text = $"⚠ BAD ({subLabel})";
+                DefectBadge.Visibility = Visibility.Visible;
+                OkBadge.Visibility = Visibility.Collapsed;
+            }
+            else if (verdict == "GOOD")
+            {
+                OkBadgeLabel.Text = $"✓ GOOD ({subLabel})";
+                DefectBadge.Visibility = Visibility.Collapsed;
+                OkBadge.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                DefectBadge.Visibility = Visibility.Collapsed;
+                OkBadge.Visibility = Visibility.Collapsed;
+            }
         }
 
         private void ClearResults()

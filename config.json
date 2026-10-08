@@ -1,8 +1,8 @@
 {
   "BackgroundMethod": "Silhouette",
   "FlattenLighting": true,
-  "AutoThreshold": true,
-  "SilhouetteThreshold": 60,
+  "AutoThreshold": false,
+  "SilhouetteThreshold": 95,
   "RegionsToKeep": 1,
   "MirrorOnLeft": true,
   "SilhouetteMorphKernel": 5,
@@ -20,7 +20,19 @@
   "ColorDiffMorphKernel": 5,
   "ReferenceColorPath": "Assets/reference_color1.json",
 
+  "RoiEnabled": true,
+  "RoiNx": 0.15,
+  "RoiNy": 0.15,
+  "RoiNw": 0.70,
+  "RoiNh": 0.70,
+
+
   "Scan": {
+    "Trigger": {
+      "Mode": "Interval",
+      "IntervalMs": 1000.0
+    },
+
     "Encoder": {
       "BaseUrl": "http://192.168.0.193:5055",
       "Path": "/encoder",
@@ -48,7 +60,7 @@
     },
 
     "Inspection": {
-      "Method": "PatchCore-R18",
+      "Method": "PatchCore-R50",
       "TwoStage": {
         "Enabled": false,
         "ScreenMethod": "ColorDiff"
@@ -62,6 +74,7 @@
       "MaxLineSpeedMmPerSec": 170.0,
       "StoreImagesFor": "defects-only",
       "ShowBackgroundMaskWindow": true
+      
     },
 
     "Simulate": {

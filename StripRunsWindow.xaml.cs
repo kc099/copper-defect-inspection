@@ -197,7 +197,28 @@ namespace copperInspection
             }
 
             var missing = new HashSet<int>(run.MissingSegments);
-            var byIndex = segments.ToDictionary(s => s.SegmentIndex);
+
+            // Deliberately NOT ToDictionary: a run can contain the same
+            // segment index twice, and that used to throw
+            // "An item with the same key has already been added", taking the
+            // whole app down just for opening a run. A duplicate means
+            // something upstream recorded two captures under one index -
+            // most likely a segment that was still in the inspection queue
+            // when the run was re-armed, since the recorder field is read
+            // fresh per job (see ArmScanProbeCoreAsync's comment) so a
+            // late job lands in the NEXT run still carrying its old index.
+            // Surfaced in MapHint rather than silently hidden, because it
+            // means that segment's two images disagree about what's there.
+            var byIndex = new Dictionary<int, DefectReport>();
+            var duplicates = new List<int>();
+            foreach (DefectReport s in segments)
+            {
+                if (!byIndex.TryAdd(s.SegmentIndex, s))
+                {
+                    duplicates.Add(s.SegmentIndex);
+                    byIndex[s.SegmentIndex] = s;   // last one recorded wins
+                }
+            }
 
             int highest = Math.Max(
                 segments.Count > 0 ? segments.Max(s => s.SegmentIndex) : 0,
@@ -239,6 +260,10 @@ namespace copperInspection
                 ? "No segments recorded for this run."
                 : $"{highest} segment(s)" +
                   (notInspected > 0 ? $"  ·  {notInspected} never inspected" : "") +
+                  (duplicates.Count > 0
+                      ? $"  ·  ⚠ {duplicates.Count} duplicate segment index(es) " +
+                        $"[{string.Join(",", duplicates.Distinct().OrderBy(i => i))}] - showing the last recorded"
+                      : "") +
                   "  ·  click a segment to open its image";
         }
 
