@@ -726,6 +726,9 @@ namespace copperInspection
             RoiNw = _config.RoiNw,
             RoiNh = _config.RoiNh,
 
+            CameraExposureUs = _config.CameraExposureUs,
+            CameraGain = _config.CameraGain,
+
             // No UI edits this yet (no Strip Scan panel) - carry it forward
             // unchanged. Without this line, CollectConfig() silently produces
             // a brand-new default ScanConfig() instead (PipelineConfig.Scan's
@@ -920,7 +923,7 @@ namespace copperInspection
             await Task.Run(() =>
             {
                 if (!_cameraB.EnsureStarted()) { error = "camera bridge failed to start"; return; }
-                try { _cameraB.Connect(device); }
+                try { _cameraB.Connect(device, _config.CameraExposureUs, _config.CameraGain); }
                 catch (Exception ex) { error = ex.Message; }
             });
 
@@ -960,7 +963,7 @@ namespace copperInspection
             string? error = null;
             await Task.Run(() =>
             {
-                try { _camera.Connect(device); }
+                try { _camera.Connect(device, _config.CameraExposureUs, _config.CameraGain); }
                 catch (Exception ex) { error = ex.Message; }
             });
 

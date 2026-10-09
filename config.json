@@ -26,6 +26,9 @@
   "RoiNw": 0.70,
   "RoiNh": 0.70,
 
+  "CameraExposureUs": 41813,
+  "CameraGain": 5.89,
+
 
   "Scan": {
     "Trigger": {

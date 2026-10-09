@@ -89,6 +89,12 @@ namespace copperInspection.Camera.Protocol
         /// <summary>"list" | "connect" | "start" | "stop" | "capture"</summary>
         public string Cmd { get; set; } = "";
         public string? DeviceId { get; set; }
+
+        /// <summary>For "connect": fixed exposure (microseconds) and gain to
+        /// write to the camera, with the matching auto mode switched off.
+        /// Null = leave whatever the camera already has.</summary>
+        public double? ExposureUs { get; set; }
+        public double? Gain { get; set; }
     }
 
     public sealed class ControlResponse

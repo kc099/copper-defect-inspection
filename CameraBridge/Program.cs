@@ -111,6 +111,13 @@ try
                     cam = newCam;
                     resp.ConnectedLabel = req.DeviceId;
                     Log($"  -> connected to {req.DeviceId}, IsConnected={cam.IsConnected}");
+                    LogCameraSettings("as found on connect");
+                    if (req.ExposureUs != null || req.Gain != null)
+                    {
+                        ApplyFixed("ExposureAuto", "ExposureTime", req.ExposureUs);
+                        ApplyFixed("GainAuto", "Gain", req.Gain);
+                        LogCameraSettings("after applying config");
+                    }
                     StartGrabbing();
                     resp.Streaming = state.Streaming;
                     Log($"  -> streaming={state.Streaming}");
@@ -198,6 +205,47 @@ void Disconnect()
     try { cam?.Disconnect(); } catch (NeoException ex) { Log($"Disconnect: {ex.Message}"); }
     cam?.Dispose();
     cam = null;
+}
+
+// What the camera is ACTUALLY running with, read back from the device - not
+// what a viewer or config file says it should be. The camera keeps its
+// settings only while powered (unless saved to a User Set), so this line is
+// the one place that shows what a live frame was really exposed with.
+void LogCameraSettings(string when)
+{
+    if (cam == null) return;
+    var parts = new List<string>();
+    foreach (string name in new[] { "ExposureAuto", "ExposureTime", "GainAuto", "Gain", "Gamma",
+                                    "BrightnessAutoNominalValue", "PixelFormat", "UserSetDefault" })
+    {
+        try
+        {
+            if (!cam.HasFeature(name)) continue;
+            Feature f = cam.GetFeature(name);
+            if (f.IsAvailable && f.IsReadable) parts.Add($"{name}={f.ValueString}");
+        }
+        catch (Exception ex) { parts.Add($"{name}=?({ex.Message})"); }
+    }
+    Log($"  -> camera settings ({when}): {string.Join(", ", parts)}");
+}
+
+// A fixed value only sticks with auto off - the camera locks the feature
+// while its auto mode is running. A failure here is logged, not thrown: a
+// camera that connects with the wrong exposure is still more useful than
+// one that refuses to connect.
+void ApplyFixed(string autoFeature, string feature, double? value)
+{
+    if (cam == null || value == null) return;
+    try
+    {
+        if (cam.HasFeature(autoFeature))
+        {
+            Feature auto = cam.GetFeature(autoFeature);
+            if (auto.IsAvailable && auto.IsWritable) auto.ValueString = "Off";
+        }
+        cam.GetFeature(feature).ValueDouble = value.Value;
+    }
+    catch (Exception ex) { Log($"  -> WARNING: could not set {feature}={value}: {ex.Message}"); }
 }
 
 void StartGrabbing()

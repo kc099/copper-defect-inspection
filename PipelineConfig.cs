@@ -76,6 +76,18 @@ namespace copperInspection
         public double RoiNw { get; set; } = 0.70;
         public double RoiNh { get; set; } = 0.70;
 
+        // ── Camera exposure ──────────────────────────────────────────────────
+        /// <summary>Fixed exposure (microseconds) and gain written to the
+        /// camera on every connect, with auto exposure/gain switched off.
+        /// Null = don't touch, the camera keeps whatever it already has.
+        ///
+        /// Why this exists: the models were trained on stills saved from
+        /// Baumer's viewer, and the camera only remembers the viewer's
+        /// settings while it stays powered. Setting them here makes a live
+        /// frame match the training exposure no matter what ran before.</summary>
+        public double? CameraExposureUs { get; set; }
+        public double? CameraGain { get; set; }
+
         // ── Continuous strip scan ────────────────────────────────────────────
         /// <summary>Encoder-triggered strip scanning: PCB address, field of
         /// view, overlap, capture delay. Re-read at the start of every run so

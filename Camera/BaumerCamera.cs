@@ -139,9 +139,12 @@ namespace copperInspection.Camera
 
         /// <summary>Throws on failure - caller decides how to surface that
         /// (a status label, not a crash).</summary>
-        public void Connect(CameraDeviceInfo device)
+        public void Connect(CameraDeviceInfo device, double? exposureUs = null, double? gain = null)
         {
-            var resp = SendRequest(new ControlRequest { Cmd = "connect", DeviceId = device.Id }, out _)
+            var resp = SendRequest(new ControlRequest
+                {
+                    Cmd = "connect", DeviceId = device.Id, ExposureUs = exposureUs, Gain = gain,
+                }, out _)
                 ?? throw new InvalidOperationException("No response from camera bridge.");
             if (!resp.Ok) throw new InvalidOperationException(resp.Error ?? "Connect failed.");
             IsConnected = true;

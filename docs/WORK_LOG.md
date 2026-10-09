@@ -538,6 +538,79 @@ after this fix, the next lever is retraining with a more deliberately chosen
 margin or a larger/more diverse calibration set — not another round of
 preprocessing archaeology.
 
+### Camera exposure/gain: logged on connect and settable from config.json (Oct 9, 2026)
+
+**Background.** `docs/SESSION_2026-10-08.md` found that live frames are
+over-exposed (mean brightness ~200 vs ~67 for the training stills, ~61 % of
+pixels clipped vs ~2.6 %) and that this is why PatchCore reads BAD on every
+live frame while the same model reads GOOD on an uploaded training `.bmp`.
+Until today `CameraBridge/Program.cs` never read or wrote any camera feature:
+it did `Connect()` → `StartStreaming()` → `GetImage()` and inherited whatever
+the camera already had.
+
+**What was known going in.**
+- The training stills were saved from **Baumer's own viewer**, not from the
+  Python collection apps.
+- A photo of the viewer's Brightness panel (`others/settings_photo.jpg`,
+  taken Oct 9) shows **Exposure Time 41813 µs, Gain 5.89, Target Brightness
+  51 %, Gamma correction on at 1.20**. The state of the panel's "Auto" switch
+  cannot be read reliably from the photo.
+- The operator's working assumption was that these viewer settings carry
+  over to the WPF app. That is true only while the camera stays powered: the
+  camera holds them in volatile memory and falls back to its saved default
+  User Set after a power cycle. Nothing in the app guaranteed them.
+
+**Two things ruled out the same day (so nobody re-checks them).**
+- *"Silhouette is the fix for over-exposure."* Silhouette segmentation is
+  already applied on every PatchCore run and the live frames read BAD with it
+  on. It blacks out the backlight but leaves the strip pixels exactly as
+  exposed.
+- *"The silhouette threshold is 95 instead of 90."* `config.json` does say
+  95, but for PatchCore the model's recorded value (90, in
+  `Assets/patchcore_resnet50_meta.json`) overrides it in
+  `InspectionEngine.Run`, which the file path, live capture and strip scan
+  all go through. An uploaded training image reads GOOD with the same
+  config, which confirms it.
+
+**Changes.**
+
+| File | Change |
+|---|---|
+| `Camera/CameraProtocol.cs` | `ControlRequest` gained `ExposureUs` and `Gain` (both `double?`), used by `"connect"`. Null = leave the camera alone. |
+| `CameraBridge/Program.cs` | New `LogCameraSettings(when)`: reads back `ExposureAuto`, `ExposureTime`, `GainAuto`, `Gain`, `Gamma`, `BrightnessAutoNominalValue`, `PixelFormat`, `UserSetDefault` (whichever the camera has) and logs them on one line. New `ApplyFixed(autoFeature, feature, value)`: sets the auto feature to `Off`, then writes the value; a failure is logged as `WARNING` and does not fail the connect. `"connect"` now logs the settings as found, applies exposure/gain if given, and logs again. |
+| `Camera/BaumerCamera.cs` | `Connect(device, exposureUs = null, gain = null)` forwards the two values in the request. |
+| `PipelineConfig.cs` | New `CameraExposureUs` and `CameraGain` (`double?`). |
+| `MainWindow.xaml.cs` | Both connect call sites (camera A and camera B) pass the config values. `CollectConfig()` carries the two fields forward, otherwise they would be dropped on the next config save. |
+| `config.json` | `"CameraExposureUs": 41813`, `"CameraGain": 5.89` — the values from the viewer photo. |
+
+Both cameras get the same two values; there is no per-camera setting yet.
+Gamma is logged but not set.
+
+**How to use it.** Edit the two values in `config.json` and restart the app.
+Remove the two lines to go back to "don't touch the camera". The read-back
+lines are in `CameraBridge.<channel>.log` next to the bridge exe (and in the
+app's camera log), prefixed `camera settings (as found on connect)` and
+`camera settings (after applying config)`.
+
+**Status: built, not tested on hardware.** `dotnet build -c Debug
+-p:Platform=x64` succeeds; no camera was attached to the dev machine, so the
+feature names, the `Off` enum string and the value ranges are unverified
+against the real device. Only `bin\x64\Debug` was rebuilt — `bin\Debug`
+still holds a bridge from 16 Sep (see environment trap 1 in the Oct 8
+session doc).
+
+**Next step on site.** Connect once and read the two `camera settings`
+lines.
+- "As found" already shows ~41813 µs / 5.89 with auto off → the camera
+  settings were never the difference. Look next at lighting, at `Gamma`
+  (the viewer had 1.20), and at whether the live ROI simply contains more
+  backlight than the training crops did: the Oct 8 comparison measured
+  whole-frame brightness, and matching image size does not prove matching
+  composition.
+- "As found" shows something else → that was the cause; "after applying"
+  should show it corrected. Re-run the Oct 8 brightness comparison
+  (target: mean ≈ 67, clipped ≈ 2.5 %).
+
 ---
 
 ## 2. Current pipeline shape (both detection methods)
